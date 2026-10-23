@@ -1,0 +1,1 @@
+{"v":1,"alg":"AES-256-GCM","kdf":{"name":"scrypt","n":32768,"r":8,"p":1,"length":32,"salt":"O8m9+3d2pI62rWDufW5msg=="},"nonce":"/Ee8wmyx33MxP10K","ct":"MMraM3UPuotDNOobOpCeYtkLhsjzqjdGpfsxC3zTGjOnH6Xu89Tfy62A3fD12g=="}

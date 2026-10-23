@@ -132,3 +132,14 @@ section.chart{margin:0;min-width:0}.chart .summary{margin:0 0 10px;font-size:.88
   .time{font-size:1.5rem}
 }
 @media (prefers-reduced-motion:reduce){*{transition:none!important}}
+
+/* Start cooldown dialog */
+.opts{display:grid;gap:8px;margin:4px 0 12px}
+.opt{display:flex;align-items:center;gap:10px;padding:10px 12px;border:1px solid var(--line-strong);border-radius:12px;cursor:pointer;font-weight:400}
+.opt:has(input:checked){border-color:var(--accent);box-shadow:0 0 0 2px var(--accent) inset}
+.opt:focus-within{outline:2px solid var(--accent);outline-offset:2px}
+.opt input{flex:none;width:auto;margin:0}
+.opt span{display:grid;gap:2px}
+.opt small{color:var(--muted);font-size:.83rem}
+.modebox{display:grid;gap:10px;margin-bottom:8px}
+.modebox[hidden]{display:none}

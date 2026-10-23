@@ -6,6 +6,7 @@ import asyncio
 import copy
 import logging
 import os
+import re
 from collections.abc import Callable, Mapping
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -61,6 +62,14 @@ class AmbiguousTime(ValidationFailed):
     """The local wall-clock time occurs twice (DST fall-back); the caller must say which occurrence is meant."""
 
 
+class PartialFailure(Exception):
+    """Part of a combined operation was saved and part was not; the message says exactly which."""
+
+
+HHMM = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
+MAX_PENDING_REMINDERS = 50
+
+
 class ConfigError(Exception):
     """An environment variable holds an unusable value. Messages never contain secret values."""
 
@@ -94,13 +103,13 @@ def resolve_local_time(text: str, tz_name: str, occurrence: str | None = None) -
     utc_first, utc_second = first.astimezone(timezone.utc), second.astimezone(timezone.utc)
     if utc_first.astimezone(tz).replace(tzinfo=None) != dt:  # round-trip changes the wall time: it falls in a gap
         raise ValidationFailed(
-            f"{dt:%Y-%m-%d %H:%M} does not exist in {tz_name} (daylight-saving gap); pick another time"
+            f"{dt:%Y-%m-%d %H:%M} is not a valid time in {tz_name}; pick another time"
         )
     if utc_first == utc_second:
         return utc_first
     if occurrence is None:
         raise AmbiguousTime(
-            f"{dt:%Y-%m-%d %H:%M} happens twice in {tz_name} (daylight-saving change); choose the earlier or later one"
+            f"{dt:%Y-%m-%d %H:%M} occurs twice in {tz_name}; choose the earlier or later one"
         )
     return utc_first if occurrence == "earlier" else utc_second
 
@@ -462,48 +471,163 @@ class Engine:
             now = self.clock()
             async with self.nlock:
                 self._process_expiry_locked(account_id, now)  # settle a lapsed-but-unprocessed expiry first
-            timer = self.state["timers"].get(account_id)
-            duration = timedelta(seconds=acct["duration_seconds"])
-            new = copy.deepcopy(self.state)
-            cur = new["timers"].get(account_id) or {"reset_count": 0}
-            active = bool(timer and timer["status"] == "cooling" and parse_iso(timer["ts_expired"]) > now)
-            if active:
-                assert timer is not None
-                previous = timer["ts_expired"]
-                cur.update(ts_expired=iso(parse_iso(previous) + duration), expiry_id=new_id())
-                etype = "extend"
-            else:
-                previous = None
-                cur.update(
-                    status="cooling",
-                    cooldown_id=new_id(),
-                    expiry_id=new_id(),
-                    ts_start=iso(now),
-                    ts_expired=iso(now + duration),
-                    expiry_processed=False,
-                )
-                etype = "start"
-            cur.update(status="cooling", last_reset=iso(now), reset_count=cur["reset_count"] + 1)
-            new["timers"][account_id] = cur
-            self._commit("state", new)  # JSON is authoritative; analytics follows
-            warnings = self._record(
-                {
-                    "event_id": new_id(),
-                    "event_type": etype,
-                    "event_ts": iso(now),
-                    "cooldown_id": cur["cooldown_id"],
-                    "ts_start": cur["ts_start"],
-                    "ts_expired": cur["ts_expired"],
-                    "previous_ts_expired": previous,
-                    "configured_seconds": acct["duration_seconds"],
-                    "project": acct["project"] or None,
-                    "prompt": acct["prompt"] or None,
-                    "reset_count": cur["reset_count"],
-                },
-                acct,
+            return self._start_locked(acct, now, None)
+
+    async def begin_cooldown(
+        self,
+        account_id: str,
+        mode: str = "default",
+        completes_at: str | None = None,
+        occurrence: str | None = None,
+        project: str | None = None,
+        prompt: str | None = None,
+    ) -> dict[str, Any]:
+        """Main-site Start cooldown. ``mode`` is ``default`` (default duration; extends an active timer) or ``at``
+        (explicit completion time). Empty ``project``/``prompt`` keep the saved values; only non-empty ones replace them."""
+        if mode not in ("default", "at"):
+            raise ValidationFailed("mode must be 'default' or 'at'")
+        async with self.lock:
+            acct = self._acct(account_id)
+            if acct["archived"]:
+                raise ValidationFailed("archived accounts cannot start a cooldown")
+            now = self.clock()
+            new_project = (project or "").strip()
+            new_prompt = prompt if (prompt or "").strip() else ""
+            if len(new_project) > 100:
+                raise ValidationFailed("project must be at most 100 characters")
+            if len(new_prompt) > 4000:
+                raise ValidationFailed("prompt must be at most 4000 characters")
+            target: datetime | None = None
+            if mode == "at":
+                target = resolve_local_time(completes_at or "", self.timezone_name, occurrence).replace(microsecond=0)
+                if target <= now:
+                    raise ValidationFailed("That time has already passed. Choose a time in the future.")
+                if target > now + timedelta(seconds=MAX_DURATION):
+                    raise ValidationFailed("That time is too far in the future (at most 30 days).")
+            async with self.nlock:
+                self._process_expiry_locked(account_id, now)
+            meta_changed = bool(new_project or new_prompt)
+            if meta_changed:
+                accts = copy.deepcopy(self.accounts)
+                a2 = next(a for a in accts["accounts"] if a["id"] == account_id)
+                if new_project:
+                    a2["project"] = new_project
+                if new_prompt:
+                    a2["prompt"] = new_prompt
+                a2["modified_at"] = iso(now)
+                self._commit("accounts", accts)  # metadata first so the analytics snapshot reflects it
+                acct = a2
+                self._sync_account(acct)
+            try:
+                result = self._start_locked(acct, now, target)
+            except (StoreError, ValidationFailed) as exc:
+                if meta_changed:
+                    raise PartialFailure(
+                        f"The project/prompt were saved, but the cooldown was not started: {exc}"
+                    ) from exc
+                raise
+            return result
+
+    def _start_locked(self, acct: dict[str, Any], now: datetime, target: datetime | None) -> dict[str, Any]:
+        account_id = acct["id"]
+        timer = self.state["timers"].get(account_id)
+        duration = timedelta(seconds=acct["duration_seconds"])
+        new = copy.deepcopy(self.state)
+        cur = new["timers"].get(account_id) or {"reset_count": 0}
+        active = bool(timer and timer["status"] == "cooling" and parse_iso(timer["ts_expired"]) > now)
+        if active:
+            assert timer is not None
+            previous = timer["ts_expired"]
+            end = target if target is not None else parse_iso(previous) + duration
+            cur.update(ts_expired=iso(end), expiry_id=new_id(), expiry_processed=False)
+            etype = "extend"
+        else:
+            previous = None
+            cur.update(
+                status="cooling",
+                cooldown_id=new_id(),
+                expiry_id=new_id(),
+                ts_start=iso(now),
+                ts_expired=iso(target if target is not None else now + duration),
+                expiry_processed=False,
             )
-            self.wake.set()
-            return {**self.view(acct, now), "event": etype, "warnings": warnings}
+            etype = "start"
+        cur.update(status="cooling", last_reset=iso(now), reset_count=cur["reset_count"] + 1)
+        new["timers"][account_id] = cur
+        self._commit("state", new)
+        warnings = self._record(
+            {
+                "event_id": new_id(),
+                "event_type": etype,
+                "event_ts": iso(now),
+                "cooldown_id": cur["cooldown_id"],
+                "ts_start": cur["ts_start"],
+                "ts_expired": cur["ts_expired"],
+                "previous_ts_expired": previous,
+                "configured_seconds": acct["duration_seconds"],
+                "project": acct["project"] or None,
+                "prompt": acct["prompt"] or None,
+                "reset_count": cur["reset_count"],
+            },
+            acct,
+        )
+        self.wake.set()
+        return {**self.view(acct, now), "event": etype, "warnings": warnings}
+
+    async def schedule_reminder(self, account_id: str, hhmm: str) -> dict[str, Any]:
+        """One-off Slack reminder at HH:MM in the effective zone (next day if already past). Touches no timer or metadata."""
+        m = HHMM.match((hhmm or "").strip())
+        if not m:
+            raise ValidationFailed("Enter the reminder time as HH:MM (24-hour), e.g. 18:30.")
+        async with self.lock:
+            acct = self._acct(account_id)
+            if acct["archived"]:
+                raise ValidationFailed("archived accounts cannot schedule reminders")
+            async with self.nlock:
+                cfg = self.effective_config()
+                if not cfg["slack"]["enabled"] or not cfg["slack"]["webhook_url"]:
+                    raise ValidationFailed("Slack notifications are not enabled; turn them on in Settings to use reminders.")
+                if sum(1 for j in self.notifs["jobs"] if j.get("kind") == "reminder" and j["status"] == "pending") >= MAX_PENDING_REMINDERS:
+                    raise ValidationFailed("Too many pending reminders.")
+                now = self.clock()
+                tz = ZoneInfo(self.timezone_name)
+                local = now.astimezone(tz)
+                h, mi = int(m.group(1)), int(m.group(2))
+                day = local.date()
+                for _ in range(2):
+                    at = datetime(day.year, day.month, day.day, h, mi, tzinfo=tz).astimezone(timezone.utc)
+                    if at > now:
+                        break
+                    day = day + timedelta(days=1)
+                rid = new_id()
+                new = copy.deepcopy(self.notifs)
+                new["jobs"].append(
+                    {
+                        "id": rid,
+                        "kind": "reminder",
+                        "account_id": acct["id"],
+                        "expiry_id": f"reminder:{rid}",
+                        "destination": "slack",
+                        "status": "pending",
+                        "attempts": 0,
+                        "created_at": iso(now),
+                        "last_attempt": None,
+                        "next_attempt": iso(at),
+                        "remind_at": iso(at),
+                        "last_http_status": None,
+                        "last_error": None,
+                        "snapshot": {
+                            "account": acct["name"],
+                            "icon": acct["icon"],
+                            "project": acct["project"],
+                            "prompt": "",
+                            "ts_expired": iso(at),
+                        },
+                    }
+                )
+                self._commit("notifications", new)
+        self.wake.set()
+        return {"id": rid, "remind_at": iso(at), "account_id": account_id}
 
     async def set_expiry(
         self,
@@ -656,7 +780,10 @@ class Engine:
                     )
                     return
                 try:
-                    payload = notify.render(slack["template"], notify.build_context(job["snapshot"], cfg))
+                    if job.get("kind") == "reminder":
+                        payload = notify.reminder_payload(job["snapshot"], cfg)
+                    else:
+                        payload = notify.render(slack["template"], notify.build_context(job["snapshot"], cfg))
                 except ValueError as exc:
                     self._finish_job(
                         job_id, now, notify.Outcome(False, None, f"template error: {exc}", permanent=True), cfg=cfg

@@ -70,16 +70,69 @@ function startTicker() { clearInterval(tickTimer); tick(); tickTimer = setInterv
 document.addEventListener("visibilitychange", () => { if (!document.hidden) { tick(); load().then(() => { if (location.hash === "" || location.hash === "#/") route(); }).catch(() => {}); } });
 
 /* ------------------------------------------------------------ views */
-const starting = new Set();
-async function startNow(a, btn) {  // one click, no dialog: the configured default duration is used directly
-  if (starting.has(a.id)) return;
-  starting.add(a.id); btn.disabled = true; btn.setAttribute("aria-busy", "true");
-  try {
-    const r = await api("POST", `/accounts/${a.id}/start`);
-    toast(r?.warnings?.length ? r.warnings.join(" ") : "Cooldown started");
-    await load(); route();
-  } catch (e) { toast(e.message); btn.disabled = false; btn.removeAttribute("aria-busy"); }
-  finally { starting.delete(a.id); }
+/* Start cooldown dialog (main site only; the widget starts/extends directly). */
+function cooldownDialog(a) {
+  const dlg = $("#dlg"), err = h("p", { class: "err", role: "alert" }), cooling = a.status === "cooling";
+  let mode = "default", busy = false;
+  const curProject = (a.project || "").trim(), curPrompt = (a.prompt || "").trim();
+  const dur = RS.fmtDuration(a.duration_seconds);
+  const choices = [
+    ["default", cooling ? "Extend by default" : "Use default duration", cooling ? `Adds ${dur} to the current end time` : `${dur} from now`],
+    ["at", "Set completion time", "Pick the exact end date and time"],
+    ["remind", "Remind me at", "One-off Slack reminder; no cooldown change"],
+  ];
+  const atInput = h("input", { type: "datetime-local", name: "completes_at", step: 60, "aria-label": "Cooldown completes at" });
+  const occ = h("select", { name: "occurrence", "aria-label": "Which occurrence" }, h("option", { value: "earlier" }, "Earlier occurrence"), h("option", { value: "later" }, "Later occurrence"));
+  const occLabel = h("label", { hidden: true }, "That time occurs twice. Which one?", occ);
+  const atBox = h("div", { class: "modebox", hidden: true }, h("label", {}, "Completes at", atInput), occLabel,
+    h("span", { class: "hint" }, `Time zone: ${S.config.timezone}. The default duration is not changed.`));
+  const hhmm = h("input", { type: "text", name: "time", inputmode: "numeric", placeholder: "HH:MM", maxlength: 5, autocomplete: "off", "aria-label": "Reminder time (HH:MM)" });
+  const remBox = h("div", { class: "modebox", hidden: true }, h("label", {}, "Remind at (HH:MM, 24-hour)", hhmm),
+    h("span", { class: "hint" }, `Time zone: ${S.config.timezone}. If that time has passed today, the reminder is set for tomorrow. Requires Slack notifications.`));
+  const project = h("input", { name: "project", maxlength: 100, placeholder: curProject || "No project saved", autocomplete: "off" });
+  const prompt = h("textarea", { name: "prompt", maxlength: 4000, placeholder: curPrompt ? curPrompt.slice(0, 160) + (curPrompt.length > 160 ? "…" : "") : "No continuation prompt saved" });
+  const metaBox = h("div", { class: "modebox" },
+    h("label", {}, "Project", project, h("span", { class: "hint" }, curProject ? `Leave empty to keep “${curProject}”.` : "Leave empty to keep it unset.")),
+    h("label", {}, "Continuation prompt", prompt, h("span", { class: "hint" }, curPrompt ? "Leave empty to keep the saved prompt." : "Leave empty to keep it unset.")));
+  const submit = h("button", { class: "primary grow", type: "submit" }, "Start cooldown");
+  const radios = choices.map(([m, title, sub]) => {
+    const r = h("input", { type: "radio", name: "mode", value: m, checked: m === mode, onchange: () => setMode(m) });
+    return h("label", { class: "opt" }, r, h("span", {}, h("strong", {}, title), h("small", {}, sub)));
+  });
+  function setMode(m) {
+    mode = m; err.textContent = "";
+    atBox.hidden = m !== "at"; remBox.hidden = m !== "remind"; metaBox.hidden = m === "remind";
+    submit.textContent = m === "remind" ? "Set reminder" : cooling && m === "default" ? "Extend cooldown" : "Start cooldown";
+  }
+  setMode("default");
+  const f = h("form", { novalidate: true, onsubmit: async ev => {
+    ev.preventDefault(); if (busy) return;
+    err.textContent = "";
+    if (mode === "at" && !atInput.value) { err.textContent = "Choose the date and time the cooldown should finish."; return; }
+    if (mode === "remind" && !/^([01]?\d|2[0-3]):[0-5]\d$/.test(hhmm.value.trim())) { err.textContent = "Enter the reminder time as HH:MM (24-hour), e.g. 18:30."; return; }
+    busy = true; submit.disabled = true; submit.setAttribute("aria-busy", "true");
+    try {
+      let r;
+      if (mode === "remind") {
+        r = await api("POST", `/accounts/${a.id}/reminder`, { time: hhmm.value.trim() });
+        dlg.close(); toast("Reminder set for " + fmtLocal(r.remind_at));
+      } else {
+        r = await api("POST", `/accounts/${a.id}/cooldown`, { mode, project: project.value, prompt: prompt.value,
+          ...(mode === "at" ? { completes_at: atInput.value, ...(occLabel.hidden ? {} : { occurrence: occ.value }) } : {}) });
+        dlg.close(); toast(r?.warnings?.length ? r.warnings.join(" ") : r.event === "extend" ? "Cooldown extended" : "Cooldown started");
+      }
+      await load(); route();
+    } catch (e) {
+      if (e.code === "ambiguous_time") occLabel.hidden = false;
+      err.textContent = e.message;
+      if (e.code === "partial") { await load(); route(); }  // the metadata part was saved: show it behind the dialog
+      busy = false; submit.disabled = false; submit.removeAttribute("aria-busy");
+    }
+  } },
+    h("h2", {}, a.name), h("div", { class: "opts", role: "radiogroup", "aria-label": "Cooldown action" }, radios),
+    atBox, remBox, metaBox, err,
+    h("div", { class: "row" }, submit, h("button", { type: "button", onclick: () => dlg.close() }, "Cancel")));
+  mount(dlg, f); dlg.showModal();
 }
 function card(a) {
   const cooling = a.status === "cooling", project = (a.project || "").trim();
@@ -94,7 +147,7 @@ function card(a) {
           h("span", { class: "time", "data-expiry": a.ts_expired, "data-start": a.ts_start, role: "timer", "aria-live": "off" }, "…"),
           h("span", { class: "until" }, "until " + fmtEnds(a.ts_expired))))
       : h("div", { class: "state" }, h("span", { class: "pill" }, "Available"),
-          h("button", { class: "primary", onclick: ev => startNow(a, ev.currentTarget) }, RS.icon("play"), "Start cooldown")),
+          h("button", { class: "primary", onclick: () => cooldownDialog(a) }, RS.icon("play"), "Start cooldown")),
     cooling ? h("div", { class: "bar2", "aria-hidden": "true" }, h("i")) : null);
 }
 function dashboard() {
@@ -119,7 +172,7 @@ function accountDialog(a) {
   let expiryInit = cooling ? toLocalInput(a.ts_expired) : "";
   const expiry = cooling ? h("input", { type: "datetime-local", name: "completes_at", value: expiryInit, step: 60, "aria-describedby": "exphint" }) : null;
   const occ = cooling ? h("select", { name: "occurrence" }, h("option", { value: "earlier" }, "Earlier occurrence"), h("option", { value: "later" }, "Later occurrence")) : null;
-  const occLabel = cooling ? h("label", { hidden: true }, "That local time happens twice (daylight-saving change). Which one?", occ) : null;
+  const occLabel = cooling ? h("label", { hidden: true }, "That time occurs twice. Which one?", occ) : null;
   const emoji = h("input", { name: "icon", maxlength: 8, value: a?.icon || "⏳" });
   const preview = h("span", { class: "preview" });
   const drawPreview = () => {
@@ -349,7 +402,7 @@ function dataPanel() {
 function renderNav() {
   const cur = location.hash || "#/", here = href => (cur === href ? { "aria-current": "page" } : {});
   mount($("#nav"),
-    S.config.statistics_enabled ? h("a", { class: "text", href: "#/stats", ...here("#/stats") }, "Statistics") : null,
+    S.config.statistics_enabled ? RS.ibtn("chart", "Statistics", { href: "#/stats", ...here("#/stats") }, "a") : null,
     RS.ibtn("plus", "Add account", { onclick: () => accountDialog() }),
     RS.ibtn("gear", "Settings", { href: "#/settings", ...(cur === "#/settings" || cur === "#/archived" ? { "aria-current": "page" } : {}) }, "a"));
   const brand = $(".brand"); if (cur === "#/") brand.setAttribute("aria-current", "page"); else brand.removeAttribute("aria-current");

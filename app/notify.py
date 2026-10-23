@@ -117,6 +117,18 @@ def build_context(snap: dict[str, Any], cfg: dict[str, Any]) -> dict[str, str]:
     }
 
 
+def reminder_payload(snap: dict[str, Any], cfg: dict[str, Any]) -> dict[str, Any]:
+    """Fixed Block Kit message for a one-off reminder (not the cooldown-complete template)."""
+    when = format_ts(snap.get("ts_expired"), cfg["timezone"], cfg["ts_expired_format"])
+    title = f"{snap.get('icon', '')} Reminder: {snap['account']}".strip()
+    lines = [f"*{title}*", f"Scheduled for {when}"]
+    if snap.get("project"):
+        lines.append(f"Project: {snap['project']}")
+    payload = {"text": title, "blocks": [{"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}}]}
+    validate_payload(payload)
+    return payload
+
+
 SAMPLE_SNAPSHOT = {
     "account": "Example — Work",
     "icon": "🤖",

@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field
 
 from .assets import MAX_UPLOAD_BYTES
 from .crypto import KDF_DEFAULT, SecretError
-from .engine import FILE_NAMES, AmbiguousTime, ConfigError, Conflict, Engine, NotFound, ValidationFailed, backup_blob
+from .engine import FILE_NAMES, AmbiguousTime, ConfigError, Conflict, Engine, NotFound, PartialFailure, ValidationFailed, backup_blob
 from .models import iso, utcnow
 from .notify import PLACEHOLDERS
 from .store import StoreError
@@ -46,8 +46,20 @@ class ExpiryIn(BaseModel):
     """Local wall-clock time in the effective time zone (or an ISO string with an explicit offset)."""
 
     completes_at: str | None = None
-    occurrence: str | None = None  # "earlier"/"later": only needed when a DST change makes the time ambiguous
+    occurrence: str | None = None  # "earlier"/"later": only needed when the local time occurs twice
     complete_now: bool = False
+
+
+class StartIn(BaseModel):
+    mode: str = "default"  # "default" | "at"
+    completes_at: str | None = None
+    occurrence: str | None = None
+    project: str = ""  # empty == keep the saved value
+    prompt: str = ""
+
+
+class ReminderIn(BaseModel):
+    time: str
 
 
 class StatsIn(BaseModel):
@@ -134,6 +146,10 @@ def create_app(
     async def _c(_: Request, exc: Conflict) -> JSONResponse:
         return JSONResponse({"detail": str(exc)}, 409)
 
+    @app.exception_handler(PartialFailure)
+    async def _p(_: Request, exc: PartialFailure) -> JSONResponse:
+        return JSONResponse({"detail": str(exc), "code": "partial"}, 500)
+
     @app.exception_handler(StoreError)
     async def _s(_: Request, exc: StoreError) -> JSONResponse:
         log.error("storage error: %s", exc)
@@ -183,6 +199,17 @@ def create_app(
     @api.post("/accounts/{account_id}/start")
     async def start(account_id: str) -> dict[str, Any]:
         return await engine.start(account_id)
+
+    @api.post("/accounts/{account_id}/cooldown")
+    async def cooldown(account_id: str, body: StartIn) -> dict[str, Any]:
+        """Main-site Start cooldown dialog: default duration or explicit completion time, optional project/prompt."""
+        return await engine.begin_cooldown(
+            account_id, body.mode, body.completes_at, body.occurrence, body.project, body.prompt
+        )
+
+    @api.post("/accounts/{account_id}/reminder", status_code=201)
+    async def reminder(account_id: str, body: ReminderIn) -> dict[str, Any]:
+        return await engine.schedule_reminder(account_id, body.time)
 
     @api.put("/accounts/{account_id}/expiry")
     async def set_expiry(account_id: str, body: ExpiryIn) -> dict[str, Any]:

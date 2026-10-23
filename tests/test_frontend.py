@@ -275,7 +275,9 @@ def test_header_brand_icons_and_no_dashboard_or_archived_links(app):
     )
     app.post("/api/settings/statistics", json={"enabled": True})
     r1 = run_scenarios([base(app)])[0]
-    assert any(c["text"] == "Statistics" and c["href"] == "#/stats" for c in r1["header"]["controls"])
+    stat = [c for c in r1["header"]["controls"] if c["label"] == "Statistics"]
+    assert len(stat) == 1 and stat[0]["href"] == "#/stats" and stat[0]["text"] == "" and stat[0]["title"]
+    assert not any(c["text"] == "Statistics" for c in r1["header"]["controls"])  # icon only, no text link
     # the header is the same on every page and the brand leads back to the dashboard
     for hash_ in ("#/settings", "#/archived"):
         r = run_scenarios([base(app, hash=hash_)])[0]
@@ -319,17 +321,35 @@ def test_dashboard_has_only_cards_and_compact_state_aware_content(app):
 
 
 @needs_node
-def test_start_cooldown_is_one_direct_request_without_dialog(app):
+def test_start_cooldown_opens_three_option_dialog_without_request(app):
     (a,) = mk_accounts(app, "Claude")
-    scen = base(app, actions=[{"type": "click", "text": "Start cooldown"}])
-    scen["routes"][f"/api/accounts/{a['id']}/start"] = ok({"status": "cooling"})
-    r = run_scenarios([scen])[0]
-    assert [(m["method"], m["path"]) for m in mutating(r)] == [("POST", f"/api/accounts/{a['id']}/start")]
-    assert mutating(r)[0]["body"] is None  # no choice payload: the configured default duration is used server-side
-    assert not r["dlg"]["open"] and not r["errors"]
+    r = run_scenarios([base(app, actions=[{"type": "click", "text": "Start cooldown"}])])[0]
+    assert mutating(r) == [] and not r["errors"]  # nothing is sent until the dialog is submitted
+    d = r["dlg"]
+    assert d["open"]
+    for text in ("Use default duration", "Set completion time", "Remind me at", "Leave empty to keep"):
+        assert text in d["text"]
+    assert {"project", "prompt", "completes_at", "time"} <= {i["name"] for i in d["inputs"]} | {"prompt"}
+    assert "daylight" not in d["text"].lower() and "DST" not in d["text"]
     js = (Path(__file__).parent.parent / "static" / "app.js").read_text()
-    for gone in ("Extend by", "HH:MM", "Select a new", "reminder", "chooseTimeout"):
-        assert gone not in js
+    assert "/cooldown" in js and "/reminder" in js
+
+
+@needs_node
+def test_dialog_default_option_posts_cooldown_with_empty_project_prompt(app):
+    (a,) = mk_accounts(app, "Claude")
+    scen = base(app, actions=[{"type": "click", "text": "Start cooldown"}, {"type": "submit", "selector": "#dlg form"}])
+    scen["routes"][f"/api/accounts/{a['id']}/cooldown"] = ok({"status": "cooling", "event": "start"})
+    r = run_scenarios([scen])[0]
+    (m,) = mutating(r)
+    assert m["path"] == f"/api/accounts/{a['id']}/cooldown"
+    assert m["body"]["mode"] == "default" and m["body"]["project"] == "" and m["body"]["prompt"] == ""
+
+
+@needs_node
+def test_widget_still_starts_directly_without_dialog_code():
+    js = (Path(__file__).parent.parent / "static" / "widget.js").read_text()
+    assert "showModal" not in js and "cooldownDialog" not in js
 
 
 @needs_node

@@ -1,0 +1,22 @@
+[project]
+name = "ready-signal"
+version = "2.0.0"
+requires-python = ">=3.11"
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+ignore = ["E501", "UP017", "UP041", "B011", "B017"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app"]
+known-local-folder = ["conftest"]
+
+[tool.mypy]
+ignore_missing_imports = true
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B905", "E402"]

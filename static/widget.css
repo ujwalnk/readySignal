@@ -1,0 +1,12 @@
+body.widget{background:transparent;margin:0}
+body.widget main{padding:8px;max-width:none}
+.wrow{display:flex;align-items:center;gap:12px;background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:10px 12px;margin-bottom:8px}
+.icon.sm{width:40px;height:40px;font-size:1.4rem;border-radius:12px;flex:none}
+.winfo{flex:1;min-width:0}.wname{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.wname strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%}
+.wname .chip{margin-left:0;font-size:.7rem;padding:1px 8px}
+.wtime{font-size:1.5rem;font-weight:700;font-variant-numeric:tabular-nums;line-height:1.15}.wtime.ready{color:var(--ok)}
+.wproj{color:var(--muted);font-size:.82rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.wact{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
+.wact button{min-height:40px;padding:0 14px;font-size:.88rem}
+.connect{padding:12px}
+@media (max-width:420px){.wrow{flex-wrap:wrap}.wact{width:100%;justify-content:stretch}.wact button{flex:1}}

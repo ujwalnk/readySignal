@@ -1,0 +1,35 @@
+services:
+  countdown:
+    build: .
+    image: ready-signal:2.0.0
+    restart: unless-stopped
+    # Bound to localhost by default. Reach it over Tailscale/SSH tunnel/reverse proxy (see docs/security.md).
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      # Fails fast if unset. Put it in an untracked .env file (chmod 600) or use the SECRET_FILE variant below.
+      SECRET: ${SECRET:?set SECRET in .env or the environment}
+      # COOKIE_SECURE: "1"   # enable when served over HTTPS
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}            # shown in the widget embed snippet, e.g. https://signal.example.ts.net
+      FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:-127.0.0.1}  # trust X-Forwarded-* only from your reverse proxy
+    # Alternative: Compose file-based secret (not an env var, so not visible in `docker inspect`)
+    #   environment: { SECRET_FILE: /run/secrets/countdown_secret }
+    #   secrets: [countdown_secret]
+    # secrets: { countdown_secret: { file: ./secret.txt } }
+    # Persistent data is a BIND MOUNT (host directory), not a Compose-managed volume. The directory must be owned by
+    # the container's UID/GID 10001 (see docs/operations.md):  sudo install -d -o 10001 -g 10001 -m 700 ./data
+    volumes:
+      - ${DATA_HOST_DIR:-./data}:/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 192m
+    cpus: 0.5
+    pids_limit: 64
+    logging:
+      driver: json-file
+      options: { max-size: "5m", max-file: "3" }
+# Upgrading from the 1.x Compose file that used the named volume `countdown-data`? Copy its contents into the bind-mount
+# directory first (docs/operations.md, "Migrating from the named volume"). Nothing is deleted automatically.

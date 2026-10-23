@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en" data-theme="__THEME__">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="csrf-token" content="__CSRF__">
+<meta name="color-scheme" content="light dark">
+<meta name="application-name" content="__APP__">
+<meta name="description" content="__APP__ — self-hosted cooldown timers for your accounts and services.">
+<title>__APP__</title>
+<link rel="stylesheet" href="/static/app.css">
+<link rel="stylesheet" href="/static/vendor/uplot/uPlot.min.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="bar">
+  <h1 class="brand"><span aria-hidden="true">◴</span> __APP__</h1>
+  <nav id="nav" aria-label="Main"></nav>
+</header>
+<main id="main" tabindex="-1"></main>
+<div id="toast" role="status" aria-live="polite"></div>
+<dialog id="dlg"></dialog>
+<noscript><p class="pad">__APP__ needs JavaScript for live countdowns.</p></noscript>
+<script src="/static/vendor/uplot/uPlot.iife.min.js" defer></script>
+<script src="/static/common.js" defer></script>
+<script src="/static/charts.js" defer></script>
+<script src="/static/app.js" defer></script>
+</body>
+</html>

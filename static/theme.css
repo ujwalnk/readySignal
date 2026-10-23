@@ -1,0 +1,30 @@
+/* Design tokens shared by the app and the widget. Light = crisp cool whites; Dark = deep ink (designed, not inverted).
+   `data-theme` is rendered server-side on <html>: "system" follows the OS, "light"/"dark" force a mode. */
+:root{
+  --bg:#f3f6fa;--surface:#fff;--surface2:#e9eff5;--sunken:#eef2f7;
+  --ink:#0e1a28;--muted:#52667b;--line:#d3dde8;--line-strong:#b9c7d6;
+  --accent:#0b7285;--accent-hover:#095c6b;--on-accent:#fff;--accent-soft:#dff3f7;--accent-line:#8fd0dc;
+  --ok:#0b7285;--warn:#8a5a00;--err:#b42318;
+  --cool-bg:#edf1f6;--cool-line:#d9e1ea;--cool-ink:#4a5c70;--cool-bar:#aebccb;
+  --shadow:0 1px 2px rgba(14,26,40,.06),0 4px 14px rgba(14,26,40,.05);
+  --shadow-ready:0 1px 2px rgba(11,114,133,.12),0 6px 18px rgba(11,114,133,.10);
+  --c1:#0b7285;--c2:#c2410c;--c3:#4f46e5;--c4:#8a6a00;
+  color-scheme:light}
+@media (prefers-color-scheme:dark){:root[data-theme="system"]{
+  --bg:#080d14;--surface:#0f1722;--surface2:#16212f;--sunken:#0b121b;
+  --ink:#e8eef5;--muted:#8da2b8;--line:#1f2d3e;--line-strong:#2d4157;
+  --accent:#3ad0e6;--accent-hover:#6ddcec;--on-accent:#04222a;--accent-soft:#0d2a35;--accent-line:#1d6f81;
+  --ok:#3ad0e6;--warn:#e0b45a;--err:#ff8a80;
+  --cool-bg:#0b111a;--cool-line:#18232f;--cool-ink:#92a4b8;--cool-bar:#2a3a4c;
+  --shadow:0 1px 2px rgba(0,0,0,.4);--shadow-ready:0 0 0 1px rgba(58,208,230,.10),0 8px 24px rgba(0,0,0,.35);
+  --c1:#3ad0e6;--c2:#fb923c;--c3:#a5b4fc;--c4:#facc15;
+  color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#080d14;--surface:#0f1722;--surface2:#16212f;--sunken:#0b121b;
+  --ink:#e8eef5;--muted:#8da2b8;--line:#1f2d3e;--line-strong:#2d4157;
+  --accent:#3ad0e6;--accent-hover:#6ddcec;--on-accent:#04222a;--accent-soft:#0d2a35;--accent-line:#1d6f81;
+  --ok:#3ad0e6;--warn:#e0b45a;--err:#ff8a80;
+  --cool-bg:#0b111a;--cool-line:#18232f;--cool-ink:#92a4b8;--cool-bar:#2a3a4c;
+  --shadow:0 1px 2px rgba(0,0,0,.4);--shadow-ready:0 0 0 1px rgba(58,208,230,.10),0 8px 24px rgba(0,0,0,.35);
+  --c1:#3ad0e6;--c2:#fb923c;--c3:#a5b4fc;--c4:#facc15;
+  color-scheme:dark}

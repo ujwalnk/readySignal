@@ -60,3 +60,6 @@ Accounts have an optional `group` string (trimmed, ≤40 chars, no schema bump; 
 - Complete events are stamped at their expiry time, not when processed. Uploads always go through `validate_image`/`AssetStore`.
 - Not covered by automated tests (check by eye after UI changes): real layout/pixel fit of the 280×150 widget, colours/contrast, uPlot canvas, iframe clipboard permission, Docker build.
 - Logs never contain secrets/prompts; "authentication failed" = wrong `SECRET`; leftover `*.enc.new` + `rotation.commit` are recovered at start.
+
+## Docker image
+Multi-stage `Dockerfile`: the builder installs `requirements.txt` into a pip-less venv (`/opt/venv`); the runtime stage (python:3.12-slim-bookworm + `curl`/`ca-certificates`) copies only that venv, `app/` and `static/`, runs as UID 10001 with `/opt/venv/bin` on `PATH`. Bytecode is deliberately not precompiled (the container filesystem is read-only, so skipping it would cost startup time). The Dockerfile has not been build-tested in the authoring environment.

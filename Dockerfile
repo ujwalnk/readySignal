@@ -1,14 +1,22 @@
 # syntax=docker/dockerfile:1
+
+# ---- build stage: resolve and install dependencies into a venv that has no pip of its own ----
+FROM python:3.12-slim-bookworm AS builder
+ENV PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1
+RUN python -m venv --without-pip /opt/venv
+COPY requirements.txt .
+RUN pip --python /opt/venv/bin/python install -r requirements.txt
+
+# ---- runtime stage: base + curl + the venv + the app, nothing else ----
 FROM python:3.12-slim-bookworm
 LABEL org.opencontainers.image.title="Ready Signal" org.opencontainers.image.source="ready-signal"
-ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 DATA_DIR=/data HOST=0.0.0.0 PORT=8080
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 DATA_DIR=/data HOST=0.0.0.0 PORT=8080 PATH=/opt/venv/bin:$PATH
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --system --uid 10001 --no-create-home app \
     && mkdir /data && chown 10001:10001 /data && chmod 700 /data
+COPY --from=builder /opt/venv /opt/venv
 WORKDIR /srv
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
 COPY app ./app
 COPY static ./static
 USER 10001

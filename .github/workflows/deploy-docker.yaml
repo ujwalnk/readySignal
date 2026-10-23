@@ -39,7 +39,7 @@ jobs:
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=latest
+            type=raw, value=latest
 
       # Step 4: Build the image and push it to GHCR
       - name: Build and push Docker image

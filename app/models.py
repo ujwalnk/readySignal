@@ -7,7 +7,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-SCHEMA_VERSIONS = {"config": 2, "accounts": 2, "state": 1, "notifications": 1}
+SCHEMA_VERSIONS = {"config": 3, "accounts": 2, "state": 1, "notifications": 1}
 
 DEFAULT_TEMPLATE: dict[str, Any] = {
     "text": "Cooldown complete for $account",
@@ -50,9 +50,6 @@ def new_id() -> str:
 def default_widget() -> dict[str, Any]:
     return {
         "enabled": False,
-        "allowed_origin": "",  # exact parent-dashboard origin, e.g. https://dash.example.com
-        "token_hash": "",  # SHA-256 of the widget credential; the credential itself is never stored
-        "token_created_at": None,
         "account_ids": [],  # empty == every non-archived account
         "show_project": True,
         "allow_prompt_copy": True,
@@ -121,8 +118,6 @@ def validate_config(d: Any) -> None:
     _check(d["theme"] in ("system", "light", "dark"), "invalid theme")
     widget_types: tuple[tuple[str, type], ...] = (
         ("enabled", bool),
-        ("allowed_origin", str),
-        ("token_hash", str),
         ("account_ids", list),
         ("show_project", bool),
         ("allow_prompt_copy", bool),
@@ -217,9 +212,17 @@ def _config_v1_to_v2(d: dict[str, Any]) -> dict[str, Any]:
     return d
 
 
+def _config_v2_to_v3(d: dict[str, Any]) -> dict[str, Any]:
+    """v3 removes the widget credential machinery (token hash/timestamp and the parent-origin allow-list)."""
+    for key in ("allowed_origin", "token_hash", "token_created_at"):
+        d["widget"].pop(key, None)
+    d["schema_version"] = 3
+    return d
+
+
 # Migrations: {name: {from_version: fn(data) -> data}}. The pre-migration (encrypted) file is kept as *.premigrate-vN.
 MIGRATIONS: dict[str, dict[int, Any]] = {
-    "config": {1: _config_v1_to_v2},
+    "config": {1: _config_v1_to_v2, 2: _config_v2_to_v3},
     "accounts": {1: _accounts_v1_to_v2},
     "state": {},
     "notifications": {},

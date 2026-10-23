@@ -1,5 +1,5 @@
 "use strict";
-const { h, mount, fmtRemaining, fmtDuration, iconEl } = RS;
+const { h, mount, fmtRemaining, iconEl } = RS;
 const CSRF = document.querySelector('meta[name="csrf-token"]').content;
 const $ = (s, r = document) => r.querySelector(s);
 const S = { accounts: [], config: null, placeholders: [], analyticsError: null, skew: 0, baseUrl: "" };
@@ -12,7 +12,7 @@ async function request(method, path, body, raw) {
   else if (body !== undefined) headers["Content-Type"] = "application/json";
   const res = await fetch("/api" + path, { method, headers, body: raw || (body === undefined ? undefined : JSON.stringify(body)), credentials: "same-origin" });
   const data = res.headers.get("content-type")?.includes("json") ? await res.json() : null;
-  if (!res.ok) throw new Error(typeof data?.detail === "string" ? data.detail : data?.detail?.[0]?.msg || `HTTP ${res.status}`);
+  if (!res.ok) { const e = new Error(typeof data?.detail === "string" ? data.detail : data?.detail?.[0]?.msg || `HTTP ${res.status}`); e.code = data?.code; throw e; }
   return data;
 }
 const api = (method, path, body) => request(method, path, body);
@@ -20,6 +20,21 @@ function toast(msg) { const t = $("#toast"); t.textContent = msg; t.classList.ad
 const nowMs = () => Date.now() + S.skew;
 const tzOpts = () => ({ timeZone: S.config.timezone, dateStyle: "medium", timeStyle: "short" });
 function fmtLocal(iso) { return new Date(iso).toLocaleString(undefined, tzOpts()); }
+/* "6:30 PM" today, "Fri, 6:30 PM" on another day, always in the application's effective time zone. */
+function fmtEnds(iso) {
+  const tz = S.config.timezone, d = new Date(iso);
+  try {
+    const day = x => new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" }).format(x);
+    return day(d) === day(new Date(nowMs())) ? d.toLocaleTimeString(undefined, { timeZone: tz, hour: "numeric", minute: "2-digit" })
+      : d.toLocaleString(undefined, { timeZone: tz, weekday: "short", hour: "numeric", minute: "2-digit" });
+  } catch { return d.toLocaleString(); }
+}
+/* Wall-clock "YYYY-MM-DDTHH:mm" in the effective time zone, as <input type=datetime-local> expects. */
+function toLocalInput(iso) {
+  const parts = new Intl.DateTimeFormat("en-CA", { timeZone: S.config.timezone, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).formatToParts(new Date(iso));
+  const g = t => parts.find(x => x.type === t).value;
+  return `${g("year")}-${g("month")}-${g("day")}T${g("hour")}:${g("minute")}`;
+}
 
 async function copyText(text) {
   try { await navigator.clipboard.writeText(text); toast("Copied"); }
@@ -55,36 +70,44 @@ function startTicker() { clearInterval(tickTimer); tick(); tickTimer = setInterv
 document.addEventListener("visibilitychange", () => { if (!document.hidden) { tick(); load().then(() => { if (location.hash === "" || location.hash === "#/") route(); }).catch(() => {}); } });
 
 /* ------------------------------------------------------------ views */
+const starting = new Set();
+async function startNow(a, btn) {  // one click, no dialog: the configured default duration is used directly
+  if (starting.has(a.id)) return;
+  starting.add(a.id); btn.disabled = true; btn.setAttribute("aria-busy", "true");
+  try {
+    const r = await api("POST", `/accounts/${a.id}/start`);
+    toast(r?.warnings?.length ? r.warnings.join(" ") : "Cooldown started");
+    await load(); route();
+  } catch (e) { toast(e.message); btn.disabled = false; btn.removeAttribute("aria-busy"); }
+  finally { starting.delete(a.id); }
+}
 function card(a) {
-  const cooling = a.status === "cooling";
-  return h("article", { class: "card", "aria-label": a.name },
-    h("header", {}, iconEl(a), h("h3", {}, a.name),
-      h("span", { class: "chip " + (cooling ? "cool" : "ok") }, cooling ? "Cooling down" : "Available")),
-    cooling ? h("div", { class: "time", "data-expiry": a.ts_expired, "data-start": a.ts_start, role: "timer", "aria-live": "off" }, "…")
-            : h("div", { class: "time" }, "Ready"),
-    h("div", { class: "bar2", "aria-hidden": "true" }, h("i")),
-    h("div", { class: "meta" }, h("span", {}, "Duration " + fmtDuration(a.duration_seconds)),
-      cooling ? h("span", {}, "Ends " + fmtLocal(a.ts_expired)) : null, h("span", {}, "Resets: " + a.reset_count)),
-    h("p", { class: "project" + (a.project ? "" : " none") }, a.project ? h("span", {}, h("b", {}, "Project: "), a.project) : "No project set"),
-    h("div", { class: "row" },
-      h("button", { class: "primary grow", onclick: () => act(() => api("POST", `/accounts/${a.id}/start`), cooling ? "Cooldown extended" : "Cooldown started") }, cooling ? "Extend +" + fmtDuration(a.duration_seconds) : "Start cooldown"),
-      h("button", { onclick: () => copyText(a.prompt), disabled: !a.prompt, "aria-label": "Copy continuation prompt for " + a.name }, "Copy prompt"),
-      h("button", { onclick: () => accountDialog(a), "aria-label": "Edit " + a.name }, "Edit")));
+  const cooling = a.status === "cooling", project = (a.project || "").trim();
+  return h("article", { class: "card " + (cooling ? "cooling" : "available"), "aria-label": a.name },
+    h("div", { class: "top" }, iconEl(a),
+      h("div", { class: "who" }, h("h3", { title: a.name }, a.name), project ? h("p", { class: "proj", title: project }, project) : null),
+      h("div", { class: "acts" },
+        RS.ibtn("edit", "Edit " + a.name, { onclick: () => accountDialog(a) }),
+        cooling ? null : RS.ibtn("copy", "Copy prompt for " + a.name, a.prompt ? { onclick: () => copyText(a.prompt) } : { disabled: true, title: "No continuation prompt set" }))),
+    cooling
+      ? h("div", { class: "state" }, h("div", { class: "cd" }, h("span", { class: "label" }, "Cooling down"),
+          h("span", { class: "time", "data-expiry": a.ts_expired, "data-start": a.ts_start, role: "timer", "aria-live": "off" }, "…"),
+          h("span", { class: "until" }, "until " + fmtEnds(a.ts_expired))))
+      : h("div", { class: "state" }, h("span", { class: "pill" }, "Available"),
+          h("button", { class: "primary", onclick: ev => startNow(a, ev.currentTarget) }, RS.icon("play"), "Start cooldown")),
+    cooling ? h("div", { class: "bar2", "aria-hidden": "true" }, h("i")) : null);
 }
 function dashboard() {
   const list = S.accounts.filter(a => !a.archived);
-  mount($("#main"),
-    h("div", { class: "head" }, h("div", {}, h("h2", {}, "Accounts"), h("p", { class: "sub" }, "Timers are absolute timestamps — they survive restarts.")),
-      h("button", { class: "primary", onclick: () => accountDialog() }, "+ New account")),
+  mount($("#main"), h("h2", { class: "sr" }, "Accounts"),
     S.analyticsError ? h("div", { class: "banner" }, S.analyticsError + ". Timers are unaffected; history may be incomplete.") : null,
-    list.length ? h("div", { class: "grid" }, list.map(card)) : h("p", { class: "empty" }, "No accounts yet. Create one to start tracking a cooldown."));
+    list.length ? h("div", { class: "grid" }, list.map(card)) : h("div", { class: "emptycard" }, h("strong", {}, "No accounts yet"), "Use the + in the header to add your first account."));
   startTicker();
 }
 function archived() {
   const list = S.accounts.filter(a => a.archived);
-  mount($("#main"), h("h2", {}, "Archived"), h("p", { class: "sub" }, "Archiving keeps analytics history."),
-    list.length ? h("div", { class: "grid" }, list.map(a => h("article", { class: "card" }, h("header", {}, iconEl(a), h("h3", {}, a.name)),
-      h("div", { class: "meta" }, "Duration " + fmtDuration(a.duration_seconds)),
+  mount($("#main"), h("a", { class: "backlink", href: "#/settings" }, RS.icon("back"), "Settings"), h("h2", {}, "Archived accounts"), h("p", { class: "sub" }, "Archiving keeps analytics history. Restore an account to use it again."),
+    list.length ? h("div", { class: "grid" }, list.map(a => h("article", { class: "card cooling", "aria-label": a.name }, h("div", { class: "top" }, iconEl(a), h("div", { class: "who" }, h("h3", { title: a.name }, a.name))),
       h("div", { class: "row" }, h("button", { onclick: () => act(() => api("POST", `/accounts/${a.id}/restore`), "Restored") }, "Restore"))))) : h("p", { class: "empty" }, "Nothing archived."));
 }
 async function uploadIcon(id, file) { return request("PUT", `/accounts/${id}/icon`, undefined, file); }
@@ -92,6 +115,11 @@ function accountDialog(a) {
   const dlg = $("#dlg"), err = h("p", { class: "err", role: "alert" });
   const hrs = a ? Math.floor(a.duration_seconds / 3600) : 5, mins = a ? Math.floor(a.duration_seconds % 3600 / 60) : 0;
   let pending = null, objectUrl = null, remove = false;
+  const cooling = a?.status === "cooling";
+  let expiryInit = cooling ? toLocalInput(a.ts_expired) : "";
+  const expiry = cooling ? h("input", { type: "datetime-local", name: "completes_at", value: expiryInit, step: 60, "aria-describedby": "exphint" }) : null;
+  const occ = cooling ? h("select", { name: "occurrence" }, h("option", { value: "earlier" }, "Earlier occurrence"), h("option", { value: "later" }, "Later occurrence")) : null;
+  const occLabel = cooling ? h("label", { hidden: true }, "That local time happens twice (daylight-saving change). Which one?", occ) : null;
   const emoji = h("input", { name: "icon", maxlength: 8, value: a?.icon || "⏳" });
   const preview = h("span", { class: "preview" });
   const drawPreview = () => {
@@ -113,13 +141,26 @@ function accountDialog(a) {
     ev.preventDefault(); err.textContent = "";
     const v = Object.fromEntries(new FormData(f));
     const body = { name: v.name, icon: v.icon || "⏳", duration_seconds: (+v.hours || 0) * 3600 + (+v.minutes || 0) * 60, project: v.project, prompt: v.prompt };
-    try {
-      const saved = await (a ? api("PUT", `/accounts/${a.id}`, body) : api("POST", "/accounts", body));
-      let note = "Saved";
-      try { if (pending) await uploadIcon(saved.id, pending); else if (remove && a?.icon_url) await api("DELETE", `/accounts/${saved.id}/icon`); }
-      catch (e) { note = "Saved, but the image was not changed: " + e.message; }
-      dlg.close(); toast(note); await load(); route();
-    } catch (e) { err.textContent = e.message; }
+    const moveExpiry = cooling && expiry.value !== expiryInit;  // untouched field => the running timer is never rewritten
+    if (moveExpiry && !expiry.value) { err.textContent = "Enter the cooldown completion date and time."; return; }
+    let saved;
+    try { saved = await (a ? api("PUT", `/accounts/${a.id}`, body) : api("POST", "/accounts", body)); }
+    catch (e) { err.textContent = e.message; return; }
+    const notes = [];
+    try { if (pending) { await uploadIcon(saved.id, pending); pending = null; } else if (remove && a?.icon_url) { await api("DELETE", `/accounts/${saved.id}/icon`); remove = false; } }
+    catch (e) { notes.push("the image was not changed: " + e.message); }
+    if (moveExpiry) {  // separate backend operation: report a partial failure honestly and allow a retry
+      try {
+        await api("PUT", `/accounts/${saved.id}/expiry`, { completes_at: expiry.value, ...(occLabel.hidden ? {} : { occurrence: occ.value }) });
+        expiryInit = expiry.value;
+      } catch (e) {
+        if (e.code === "ambiguous_time") occLabel.hidden = false;
+        await load(); route();  // show what is actually persisted behind the dialog
+        err.textContent = "Your other changes were saved, but the completion time was not changed: " + e.message + (notes.length ? " (Also " + notes.join("; ") + ".)" : "") + " Fix it and press Save to retry.";
+        return;
+      }
+    }
+    dlg.close(); toast(notes.length ? "Saved, but " + notes.join("; ") : "Saved"); await load(); route();
   } },
     h("h2", {}, a ? "Edit account" : "New account"),
     h("label", {}, "Name", h("input", { name: "name", required: true, maxlength: 60, value: a?.name || "", placeholder: "ChatGPT — Work" })),
@@ -127,8 +168,11 @@ function accountDialog(a) {
       h("div", { class: "imgrow" }, preview, h("div", { class: "imgctl" }, file, rm)),
       h("span", { id: "imghint", class: "hint" }, "SVG, PNG, WebP or JPEG, up to 512 KB. SVGs are sanitised on upload. Without an image the emoji below is shown."),
       h("label", {}, "Fallback emoji (also used as $icon in Slack)", emoji)),
+    cooling ? h("label", {}, "Cooldown completes at", expiry, occLabel,
+      h("span", { id: "exphint", class: "hint" }, `Time zone: ${S.config.timezone}. Moves the end of the running cooldown only; the default duration below is not changed.`)) : null,
     h("div", { class: "two" }, h("label", {}, "Cooldown hours", h("input", { name: "hours", type: "number", min: 0, max: 720, value: hrs, inputmode: "numeric" })),
       h("label", {}, "Minutes", h("input", { name: "minutes", type: "number", min: 0, max: 59, value: mins, inputmode: "numeric" }))),
+    h("p", { class: "hint" }, "The default duration is what Start cooldown uses. Changing it never moves a running cooldown."),
     h("label", {}, "Current project", h("input", { name: "project", maxlength: 100, value: a?.project || "" }),
       h("span", { class: "hint" }, "Changing the project or prompt never touches the running cooldown.")),
     h("label", {}, "Current continuation prompt", h("textarea", { name: "prompt", maxlength: 4000 }, a?.prompt || ""),
@@ -219,67 +263,63 @@ async function settings() {
   const c = S.config, main = $("#main"), num = (n, v, lo, hi) => h("input", { name: n, type: "number", min: lo, max: hi, value: v, inputmode: "numeric" });
   const tpl = h("textarea", { class: "code", name: "template", spellcheck: false, "aria-label": "Block Kit JSON template" }, ""); tpl.value = c.slack.template || "";
   const out = h("pre", { "aria-live": "polite", hidden: true }), status = h("p", { role: "status" });
-  const hook = h("input", { name: "webhook_url", type: "password", autocomplete: "off", placeholder: c.slack.webhook_configured ? "Saved: " + c.slack.webhook_masked + " (leave blank to keep)" : "https://hooks.slack.com/services/…" });
+  const ENV_NOTE = "Already set in environment variable", envTz = !!c.env?.timezone, envHook = c.slack.webhook_source === "environment";
+  const hook = envHook ? h("input", { name: "webhook_url", type: "text", disabled: true, value: ENV_NOTE, "aria-label": "Webhook URL (managed by SLACK_WEBHOOK_URL)" })
+    : h("input", { name: "webhook_url", type: "password", autocomplete: "off", placeholder: c.slack.webhook_configured ? "Saved: " + c.slack.webhook_masked + " (leave blank to keep)" : "https://hooks.slack.com/services/…" });
   const slackEnabled = h("input", { type: "checkbox", name: "enabled", checked: c.slack.enabled });
   const themeSel = h("select", { name: "theme" }, ["system", "light", "dark"].map(t => h("option", { value: t, selected: c.theme === t }, t[0].toUpperCase() + t.slice(1))));
   mount(main, h("h2", {}, "Settings"), h("p", { class: "sub" }, "Everything is stored in encrypted files; nothing here requires editing JSON by hand."),
     saveForm("General & theme", () => [field("Theme", themeSel, "System follows your OS and updates live."),
-      field("Time zone (IANA name)", h("input", { name: "timezone", value: c.timezone }), "e.g. Asia/Kolkata, Europe/Berlin, UTC"),
+      field("Time zone (IANA name)", envTz ? h("input", { name: "timezone", type: "text", disabled: true, value: ENV_NOTE }) : h("input", { name: "timezone", value: c.timezone }),
+        envTz ? `Managed by the READY_SIGNAL_TIMEZONE environment variable (in effect: ${c.timezone}). Change it in the deployment environment and recreate the container.` : "e.g. Asia/Kolkata, Europe/Berlin, UTC"),
       field("Expiry reconciliation interval (s)", num("expiry_check_interval", c.expiry_check_interval, 5, 3600), "Safety net only; the scheduler wakes at exact deadlines.")],
-      f => ({ theme: f.theme.value, timezone: f.timezone.value, expiry_check_interval: +f.expiry_check_interval.value })),
+      f => ({ theme: f.elements.theme.value, ...(envTz ? {} : { timezone: f.elements.timezone.value }), expiry_check_interval: +f.elements.expiry_check_interval.value })),
+    panel("Accounts", h("p", { class: "sub" }, "Archived accounts keep their analytics history and can be restored."), h("a", { class: "btn", href: "#/archived" }, RS.icon("archive"), "Archived accounts")),
     saveForm("Timestamp formats", () => [field("$ts_start format", h("input", { name: "a", value: c.ts_start_format }), "Python strftime, e.g. %Y-%m-%d %H:%M:%S %Z"),
-      field("$ts_expired format", h("input", { name: "b", value: c.ts_expired_format }))], f => ({ ts_start_format: f.a.value, ts_expired_format: f.b.value })),
+      field("$ts_expired format", h("input", { name: "b", value: c.ts_expired_format }))], f => ({ ts_start_format: f.elements.a.value, ts_expired_format: f.elements.b.value })),
     saveForm("Delivery & retries", () => [h("div", { class: "two" }, field("Retry interval (s)", num("retry", c.retry_interval, 1, 86400)), field("Max attempts", num("max", c.max_attempts, 1, 50))),
       h("div", { class: "two" }, field("Connect timeout (s)", num("ct", c.connect_timeout, 1, 60)), field("Request timeout (s)", num("rt", c.request_timeout, 2, 120)))],
-      f => ({ retry_interval: +f.retry.value, max_attempts: +f.max.value, connect_timeout: +f.ct.value, request_timeout: +f.rt.value })),
+      f => ({ retry_interval: +f.elements.retry.value, max_attempts: +f.elements.max.value, connect_timeout: +f.elements.ct.value, request_timeout: +f.elements.rt.value })),
     panel("Slack webhook & Block Kit template",
       h("p", { class: "sub" }, "The full continuation prompt and project name are sent to Slack — an external service. Incoming webhooks post to their own configured channel."),
       h("form", { novalidate: true, onsubmit: async ev => { ev.preventDefault(); status.className = ""; status.textContent = "";
-        try { S.config = await api("PUT", "/settings", { slack: { enabled: slackEnabled.checked, webhook_url: hook.value, template: tpl.value } }); hook.value = ""; hook.placeholder = "Saved: " + S.config.slack.webhook_masked + " (leave blank to keep)"; status.className = "okmsg"; status.textContent = "Saved"; }
+        try { S.config = await api("PUT", "/settings", { slack: { enabled: slackEnabled.checked, ...(envHook ? {} : { webhook_url: hook.value }), template: tpl.value } }); if (!envHook) { hook.value = ""; hook.placeholder = "Saved: " + S.config.slack.webhook_masked + " (leave blank to keep)"; } status.className = "okmsg"; status.textContent = "Saved"; }
         catch (e) { status.className = "err"; status.textContent = e.message; } } },
-        h("label", { class: "check" }, slackEnabled, "Send Slack notifications"), field("Webhook URL", hook, "Stored encrypted; never shown again after saving."),
+        h("label", { class: "check" }, slackEnabled, "Send Slack notifications"), field("Webhook URL", hook, envHook ? "Managed by the SLACK_WEBHOOK_URL environment variable; the URL is never displayed. Change it in the deployment environment and recreate the container." : "Stored encrypted; never shown again after saving."),
         field("Message template (JSON with fallback text and blocks)", tpl),
         h("p", { class: "hint" }, "Placeholders: ", S.placeholders.map(p => h("code", {}, "$" + p)).flatMap(x => [x, " "]), " Use ", h("code", {}, "$$"), " for a literal dollar. Unknown placeholders stay as written."),
         status, out,
         h("div", { class: "row" }, h("button", { class: "primary", type: "submit" }, "Save"),
           h("button", { type: "button", onclick: async () => { try { const p = await api("POST", "/settings/template/preview", { template: tpl.value }); out.hidden = false; out.className = ""; out.textContent = JSON.stringify(p, null, 2); status.textContent = ""; } catch (e) { out.hidden = true; status.className = "err"; status.textContent = e.message; } } }, "Validate & preview"),
           h("button", { type: "button", onclick: async () => { status.className = ""; status.textContent = "Sending…"; try { const r = await api("POST", "/settings/slack/test"); status.className = r.ok ? "okmsg" : "err"; status.textContent = r.ok ? "Test message delivered" : "Failed: " + r.error; } catch (e) { status.className = "err"; status.textContent = e.message; } } }, "Send test"),
-          c.slack.webhook_configured ? h("button", { type: "button", class: "danger", onclick: async () => { if (confirm("Remove the saved webhook URL?")) { S.config = await api("PUT", "/settings", { slack: { enabled: false, clear_webhook: true } }); settings(); } } }, "Remove webhook") : null))),
-    widgetPanel(), deliveryPanel(), statsPanel(), encryptionPanel());
+          c.slack.webhook_configured && !envHook ? h("button", { type: "button", class: "danger", onclick: async () => { if (confirm("Remove the saved webhook URL?")) { S.config = await api("PUT", "/settings", { slack: { enabled: false, clear_webhook: true } }); settings(); } } }, "Remove webhook") : null))),
+    widgetPanel(), deliveryPanel(), statsPanel(), dataPanel());
 }
+const WIDGET_ROW = 34, WIDGET_PAD = 12;  // must match widget.css (--row, container padding)
 function widgetPanel() {
   const w = S.config.widget, msg = h("p", { role: "status" }), active = S.accounts.filter(a => !a.archived);
   const enabled = h("input", { type: "checkbox", name: "enabled", checked: w.enabled });
-  const origin = h("input", { name: "origin", value: w.allowed_origin, placeholder: "https://dashboard.example.com", autocomplete: "off", inputmode: "url" });
   const showProject = h("input", { type: "checkbox", checked: w.show_project }), allowPrompt = h("input", { type: "checkbox", checked: w.allow_prompt_copy });
-  const picks = active.map(a => ({ a, box: h("input", { type: "checkbox", checked: !w.account_ids.length || w.account_ids.includes(a.id) }) }));
-  const tokenOut = h("div", { "aria-live": "polite" });
-  const base = S.baseUrl || location.origin;
-  const snippet = `<iframe src="${base}/widget" title="Ready Signal" allow="clipboard-write" loading="lazy" width="100%" height="320" style="border:0"></iframe>`;
+  const snippetEl = h("pre"), base = S.baseUrl || location.origin;
+  const draw = () => {
+    const n = picks.filter(p => p.box.checked).length || picks.length, height = Math.max(150, WIDGET_PAD + WIDGET_ROW * n);
+    snippetEl.textContent = `<iframe src="${base}/widget" title="Ready Signal" allow="clipboard-write" loading="lazy" width="280" height="${height}" style="border:0"></iframe>`;
+  };
+  const picks = active.map(a => ({ a, box: h("input", { type: "checkbox", checked: !w.account_ids.length || w.account_ids.includes(a.id), onchange: () => draw() }) }));
+  draw();
   const form = h("form", { novalidate: true, onsubmit: async ev => { ev.preventDefault(); msg.className = ""; msg.textContent = "";
     const chosen = picks.filter(p => p.box.checked).map(p => p.a.id);
-    try { S.config = await api("PUT", "/settings", { widget: { enabled: enabled.checked, allowed_origin: origin.value, show_project: showProject.checked, allow_prompt_copy: allowPrompt.checked, account_ids: chosen.length === picks.length ? [] : chosen } }); msg.className = "okmsg"; msg.textContent = "Saved"; }
+    try { S.config = await api("PUT", "/settings", { widget: { enabled: enabled.checked, show_project: showProject.checked, allow_prompt_copy: allowPrompt.checked, account_ids: chosen.length === picks.length ? [] : chosen } }); msg.className = "okmsg"; msg.textContent = "Saved"; }
     catch (e) { msg.className = "err"; msg.textContent = e.message; } } },
     h("label", { class: "check" }, enabled, "Enable the embeddable widget"),
-    field("Authorised parent-dashboard origin", origin, "Exactly the origin of the page that embeds the iframe (scheme + host [+ port], no path). Only this origin may frame the widget."),
     h("fieldset", { class: "imgset" }, h("legend", {}, "Accounts shown"), picks.length ? picks.map(p => h("label", { class: "check" }, p.box, p.a.name)) : h("p", { class: "hint" }, "No accounts yet.")),
     h("label", { class: "check" }, showProject, "Show the current project name"),
     h("label", { class: "check" }, allowPrompt, "Allow copying continuation prompts (the prompt text is served to the widget on demand)"),
-    msg, h("div", { class: "row" }, h("button", { class: "primary", type: "submit" }, "Save")));
-  const gen = h("button", { type: "button", onclick: async () => {
-    if (w.token_configured && !confirm("Generate a new credential? The current one stops working immediately.")) return;
-    try { const r = await api("POST", "/settings/widget/token"); S.config = (await api("GET", "/bootstrap")).config;
-      const inp = h("input", { readonly: true, value: r.token, "aria-label": "New widget credential", onfocus: e => e.target.select() });
-      mount(tokenOut, h("p", { class: "okmsg" }, "Copy this credential now — it is shown only once and is stored only as a hash."), inp, h("div", { class: "row" }, h("button", { type: "button", onclick: () => copyText(r.token) }, "Copy credential")));
-    } catch (e) { toast(e.message); } } }, w.token_configured ? "Rotate credential" : "Generate credential");
-  const revoke = w.token_configured ? h("button", { type: "button", class: "danger", onclick: async () => { if (confirm("Revoke the widget credential? Embedded widgets stop working until a new one is entered.")) { await api("DELETE", "/settings/widget/token"); await load(); settings(); } } }, "Revoke credential") : null;
+    msg, h("div", { class: "row" }, h("button", { class: "primary", type: "submit" }, "Save"), w.enabled ? h("a", { class: "btn", href: "/widget", target: "_blank", rel: "noopener" }, "Open widget") : null));
   return panel("Embeddable widget (iframe)",
-    h("p", { class: "sub" }, "A compact cooldown view for an existing dashboard. It needs a scoped credential (it can only list the chosen accounts, start/extend them and copy prompts). Never put the credential in a URL."),
-    form,
-    h("h4", {}, "Credential " + (w.token_configured ? "(configured)" : "(none yet)")),
-    h("div", { class: "row" }, gen, revoke), tokenOut,
-    h("h4", {}, "Embed code"), h("pre", {}, snippet),
-    h("p", { class: "hint" }, "Paste the credential into the widget once when prompted, or have the parent page send it with postMessage — see the README. Set PUBLIC_BASE_URL on the server so this snippet shows your real address."));
+    h("p", { class: "sub" }, "A compact cooldown view (about 280 × 150 px) for a dashboard on your private network. It needs no credential: anyone who can reach this address can use it, so keep Ready Signal off the public internet."),
+    form, h("h4", {}, "Embed code"), snippetEl,
+    h("p", { class: "hint" }, "The height follows the accounts shown (34 px per account). Keep allow=\"clipboard-write\" so Copy prompt works inside the frame. Set PUBLIC_BASE_URL on the server so this snippet shows your real address."));
 }
 function deliveryPanel() {
   const body = h("tbody"), p = panel("Delivery status", h("div", { class: "scroll" }, h("table", {}, h("thead", {}, h("tr", {}, ["Account", "Status", "Tries", "HTTP", "Error", ""].map(x => h("th", {}, x)))), body)));
@@ -295,18 +335,24 @@ function statsPanel() {
       if (on && !confirm("Delete all analytics history and every project name and continuation prompt? This cannot be undone.")) return;
       try { const r = await api("POST", "/settings/statistics", { enabled: !on, confirm: on }); if (r.errors.length) toast("Problem: " + r.errors.join("; ")); else toast(on ? "Statistics disabled and data deleted" : "Statistics enabled"); await load(); renderNav(); settings(); } catch (e) { toast(e.message); } } }, on ? "Disable & delete history" : "Enable statistics")));
 }
-function encryptionPanel() {
-  const box = h("p", {}, "…"); api("GET", "/encryption").then(d => { box.textContent = `${d.algorithm}, key derived with ${d.kdf.name} (N=${d.kdf.n}, r=${d.kdf.r}, p=${d.kdf.p}). SECRET comes from the environment and is never displayed. Files present: ` + Object.entries(d.files).filter(([, v]) => v).map(([k]) => k).join(", "); });
-  return panel("Encryption, backup & recovery", box,
-    h("p", { class: "hint" }, "Losing the SECRET makes the data unrecoverable. Backups are encrypted copies (JSON documents and images); restore and secret rotation are CLI procedures documented in docs/operations.md."),
-    h("a", { class: "btn", href: "/api/backup", download: "" }, "Download encrypted backup"));
+function dataPanel() {
+  const box = h("p", { class: "hint" }, "…");
+  api("GET", "/encryption").then(d => { box.textContent = `${d.algorithm}, key derived with ${d.kdf.name} (N=${d.kdf.n}, r=${d.kdf.r}, p=${d.kdf.p}). SECRET comes from the environment and is never displayed. Files present: ` + Object.entries(d.files).filter(([, v]) => v).map(([k]) => k).join(", "); });
+  return h("section", { class: "panel data", "aria-labelledby": "data-h" }, h("h3", { id: "data-h" }, "Data management"), h("h4", {}, "Encryption and recovery"),
+    h("p", {}, "The backup is an archive of your accounts, timers, settings, notification queue and images exactly as stored on disk: every file stays AES-256-GCM encrypted and is unreadable without your SECRET."),
+    box,
+    h("div", { class: "actions" }, h("a", { class: "btn primary", href: "/api/backup", download: "ready-signal-backup-encrypted.tar.gz" }, RS.icon("download"), "Download encrypted backup")),
+    h("p", { class: "hint" }, "Losing the SECRET makes the data unrecoverable. Restore and secret rotation are CLI procedures documented in docs/operations.md."));
 }
 
 /* ------------------------------------------------------------ routing */
 function renderNav() {
-  const items = [["#/", "Dashboard"], ["#/archived", "Archived"]]; if (S.config.statistics_enabled) items.push(["#/stats", "Statistics"]); items.push(["#/settings", "Settings"]);
-  const cur = location.hash || "#/";
-  mount($("#nav"), items.map(([href, label]) => h("a", { href, ...(cur === href ? { "aria-current": "page" } : {}) }, label)));
+  const cur = location.hash || "#/", here = href => (cur === href ? { "aria-current": "page" } : {});
+  mount($("#nav"),
+    S.config.statistics_enabled ? h("a", { class: "text", href: "#/stats", ...here("#/stats") }, "Statistics") : null,
+    RS.ibtn("plus", "Add account", { onclick: () => accountDialog() }),
+    RS.ibtn("gear", "Settings", { href: "#/settings", ...(cur === "#/settings" || cur === "#/archived" ? { "aria-current": "page" } : {}) }, "a"));
+  const brand = $(".brand"); if (cur === "#/") brand.setAttribute("aria-current", "page"); else brand.removeAttribute("aria-current");
 }
 function route() {
   clearInterval(tickTimer); RS.charts.clear(); document.documentElement.dataset.theme = S.config.theme; renderNav();

@@ -8,18 +8,22 @@
 <meta name="application-name" content="__APP__">
 <meta name="description" content="__APP__ — self-hosted cooldown timers for your accounts and services.">
 <title>__APP__</title>
+<link rel="stylesheet" href="/static/theme.css">
 <link rel="stylesheet" href="/static/app.css">
 <link rel="stylesheet" href="/static/vendor/uplot/uPlot.min.css">
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
 <header class="bar">
-  <h1 class="brand"><span aria-hidden="true">◴</span> __APP__</h1>
-  <nav id="nav" aria-label="Main"></nav>
+  <a class="brand" href="#/" aria-label="__APP__ — dashboard" title="Dashboard">
+    <svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true" focusable="false"><circle cx="16" cy="16" r="4" fill="currentColor" stroke="none"/><path d="M9.5 9.5a9.2 9.2 0 0 0 0 13"/><path d="M22.5 9.5a9.2 9.2 0 0 1 0 13"/><path d="M5 5.5a15.5 15.5 0 0 0 0 21" opacity=".55"/><path d="M27 5.5a15.5 15.5 0 0 1 0 21" opacity=".55"/></svg>
+    <span>__APP__</span>
+  </a>
+  <nav id="nav" class="tools" aria-label="Main"></nav>
 </header>
 <main id="main" tabindex="-1"></main>
 <div id="toast" role="status" aria-live="polite"></div>
-<dialog id="dlg"></dialog>
+<dialog id="dlg" aria-label="Dialog"></dialog>
 <noscript><p class="pad">__APP__ needs JavaScript for live countdowns.</p></noscript>
 <script src="/static/vendor/uplot/uPlot.iife.min.js" defer></script>
 <script src="/static/common.js" defer></script>

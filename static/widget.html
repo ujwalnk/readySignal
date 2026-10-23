@@ -1,16 +1,17 @@
 <!doctype html>
-<html lang="en" data-theme="__THEME__" data-origin="__ORIGIN__">
+<html lang="en" data-theme="__THEME__">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
 <meta name="robots" content="noindex">
 <title>__APP__ widget</title>
-<link rel="stylesheet" href="/static/app.css">
+<link rel="stylesheet" href="/static/theme.css">
 <link rel="stylesheet" href="/static/widget.css">
 </head>
 <body class="widget">
-<main id="w" aria-label="__APP__ cooldowns" aria-live="polite"><p class="sub pad">Loading…</p></main>
+<main id="w" aria-label="__APP__ cooldowns" aria-live="polite"><p class="msg">Loading…</p></main>
+<div id="over" role="status" aria-live="polite" hidden></div>
 <script src="/static/common.js" defer></script>
 <script src="/static/widget.js" defer></script>
 </body>

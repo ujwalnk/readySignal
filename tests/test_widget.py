@@ -1,5 +1,3 @@
-import logging
-
 import pytest
 from fastapi.testclient import TestClient
 
@@ -7,8 +5,6 @@ from app.engine import Engine, ValidationFailed
 from app.main import create_app
 
 from conftest import SECRET, csrf_token, make_engine, new_account, run, setup_slack
-
-ORIGIN = "https://dash.example.com"
 
 
 @pytest.fixture
@@ -20,13 +16,9 @@ def admin(data_dir, clock):
 
 @pytest.fixture
 def widget(admin):
-    """Browser-like widget client: no cookies, no CSRF token — just the Bearer credential."""
-    admin.put("/api/settings", json={"widget": {"enabled": True, "allowed_origin": ORIGIN}})
-    token = admin.post("/api/settings/widget/token").json()["token"]
-    c = TestClient(admin.app)
-    c.headers["Authorization"] = f"Bearer {token}"
-    c.token = token
-    return c
+    """Browser-like widget client: no cookies, no CSRF token, no credential of any kind."""
+    admin.put("/api/settings", json={"widget": {"enabled": True}})
+    return TestClient(admin.app)
 
 
 def mk(admin, name="Claude", **kw):
@@ -38,92 +30,59 @@ def mk(admin, name="Claude", **kw):
 
 def test_disabled_by_default(admin):
     assert admin.get("/widget").status_code == 404
-    assert admin.get("/widget/api/summary").status_code == 401
+    assert admin.get("/widget/api/summary").status_code == 404
+    assert admin.post("/widget/api/accounts/x/start").status_code == 404
 
 
-def test_enable_requires_valid_origin(admin):
-    assert admin.put("/api/settings", json={"widget": {"enabled": True}}).status_code == 422
-    for bad in (
-        "*",
-        "http://",
-        "dash.example.com",
-        "https://a.com/path",
-        "javascript:alert(1)",
-        'https://a.com"; x',
-        "https://a b.com",
-    ):
-        assert admin.put("/api/settings", json={"widget": {"allowed_origin": bad}}).status_code == 422, bad
-    ok = admin.put("/api/settings", json={"widget": {"enabled": True, "allowed_origin": ORIGIN + "/"}})
-    assert ok.status_code == 200 and ok.json()["widget"]["allowed_origin"] == ORIGIN
+def test_enable_needs_nothing_else(admin):
+    r = admin.put("/api/settings", json={"widget": {"enabled": True}})
+    assert r.status_code == 200
+    w = r.json()["widget"]
+    assert set(w) == {"enabled", "account_ids", "show_project", "allow_prompt_copy"}  # no token/origin fields
+    assert TestClient(admin.app).get("/widget/api/summary").status_code == 200  # no credential, no cookie
 
 
-def test_frame_ancestors_only_for_authorised_parent(admin, widget):
+def test_removed_credential_surface(admin, widget):
+    assert admin.post("/api/settings/widget/token").status_code in (404, 405)
+    assert admin.delete("/api/settings/widget/token").status_code in (404, 405)
+    r = admin.put("/api/settings", json={"widget": {"allowed_origin": "https://dash.example.com"}})
+    assert r.status_code == 200 and "allowed_origin" not in r.json()["widget"]  # unknown legacy key is ignored
+    assert "allowed_origin" not in admin.app.state.engine.config["widget"]
+    assert widget.get("/widget/api/summary", headers={"Authorization": "Bearer junk"}).status_code == 200  # ignored
+
+
+def test_widget_can_be_framed_main_pages_cannot(admin, widget):
     page = widget.get("/widget")
     assert page.status_code == 200
-    csp = page.headers["content-security-policy"]
-    assert f"frame-ancestors {ORIGIN}" in csp and "*" not in csp
-    assert "x-frame-options" not in page.headers and page.headers["cache-control"] == "no-store"
-    assert f'data-origin="{ORIGIN}"' in page.text
+    assert "x-frame-options" not in page.headers
+    assert "frame-ancestors" not in page.headers["content-security-policy"]  # no restriction on the parent
+    assert page.headers["cache-control"] == "no-store"
+    assert "data-origin" not in page.text and "__ORIGIN__" not in page.text
     main = admin.get("/")
     assert (
         main.headers["x-frame-options"] == "DENY"
         and "frame-ancestors 'none'" in main.headers["content-security-policy"]
     )
+    api = admin.get("/api/bootstrap")
+    assert api.headers["x-frame-options"] == "DENY"
     admin.put("/api/settings", json={"widget": {"enabled": False}})
-    assert widget.get("/widget").status_code == 404
+    assert widget.get("/widget").status_code == 404 and widget.get("/widget/api/summary").status_code == 404
 
 
-def test_authorisation(admin, widget):
-    mk(admin)
-    assert widget.get("/widget/api/summary").status_code == 200
-    anon = TestClient(admin.app)
-    assert anon.get("/widget/api/summary").status_code == 401
-    assert anon.get("/widget/api/summary", headers={"Authorization": "Bearer wrong"}).status_code == 401
-    assert anon.get("/widget/api/summary", headers={"Authorization": "Basic abc"}).status_code == 401
-    assert anon.get(f"/widget/api/summary?token={widget.token}").status_code == 401  # credentials never travel in URLs
-    assert (
-        anon.get(
-            "/widget/api/summary", headers={"Authorization": f"Bearer {widget.token}", "Origin": "https://evil.test"}
-        ).status_code
-        == 200
-    )  # Origin is not authentication either way
-    assert anon.get("/widget/api/summary").headers.get("www-authenticate") == "Bearer"
-    admin.put("/api/settings", json={"widget": {"enabled": False}})
-    assert widget.get("/widget/api/summary").status_code == 401
+def test_old_widget_config_is_migrated(data_dir, clock):
 
-
-def test_rotate_and_revoke(admin, widget):
-    old = widget.token
-    new = admin.post("/api/settings/widget/token").json()["token"]
-    assert new != old
-    assert (
-        TestClient(admin.app).get("/widget/api/summary", headers={"Authorization": f"Bearer {old}"}).status_code == 401
+    e = make_engine(data_dir, clock)
+    cfg = e.files["config"].load()
+    cfg["schema_version"] = 2
+    cfg["widget"].update(
+        allowed_origin="https://dash.example.com", token_hash="ab" * 32, token_created_at="2026-01-01T00:00:00Z"
     )
-    assert (
-        TestClient(admin.app).get("/widget/api/summary", headers={"Authorization": f"Bearer {new}"}).status_code == 200
-    )
-    assert admin.delete("/api/settings/widget/token").json() == {"status": "revoked"}
-    assert (
-        TestClient(admin.app).get("/widget/api/summary", headers={"Authorization": f"Bearer {new}"}).status_code == 401
-    )
-
-
-def test_credential_is_never_stored_or_leaked(admin, widget, data_dir, caplog):
-    caplog.set_level(logging.DEBUG)
-    mk(admin)
-    widget.get("/widget/api/summary")
-    engine = admin.app.state.engine
-    assert widget.token not in str(engine.config) and engine.config["widget"]["token_hash"]
-    for path in ("/api/bootstrap", "/api/encryption", "/api/notifications", "/widget"):
-        assert widget.token not in admin.get(path).text
-    assert (
-        "token_hash" not in admin.get("/api/bootstrap").text
-        and admin.get("/api/bootstrap").json()["config"]["widget"]["token_configured"]
-    )
-    assert widget.token not in caplog.text
-    for p in data_dir.rglob("*"):
-        if p.is_file():
-            assert widget.token.encode() not in p.read_bytes()
+    cfg["widget"]["enabled"] = True
+    cfg["widget"]["show_project"] = False
+    e.files["config"].save(cfg)
+    e2 = make_engine(data_dir, clock)
+    assert e2.config["schema_version"] == 3
+    assert e2.config["widget"] == {"enabled": True, "account_ids": [], "show_project": False, "allow_prompt_copy": True}
 
 
 def test_summary_is_minimal(admin, widget):
@@ -147,7 +106,17 @@ def test_summary_is_minimal(admin, widget):
         "has_prompt",
         "project",
     }
-    for forbidden in ("SECRET-PROMPT-TEXT", "WIDGETLEAK", SECRET, "webhook", "template", "/data", "scrypt", "token"):
+    for forbidden in (
+        "SECRET-PROMPT-TEXT",
+        "WIDGETLEAK",
+        SECRET,
+        "webhook",
+        "template",
+        "/data",
+        "scrypt",
+        "token",
+        "origin",
+    ):
         assert forbidden not in raw.text, forbidden
 
 
@@ -197,7 +166,7 @@ def test_widget_start_still_queues_notification_on_expiry(data_dir, clock, curl)
     e = make_engine(data_dir, clock)
     run(setup_slack(e))
     a = new_account(e, "N", prompt="continue please")
-    run(e.update_settings({"widget": {"enabled": True, "allowed_origin": ORIGIN}}))
+    run(e.update_settings({"widget": {"enabled": True}}))
     run(e.widget_start(a["id"]))
     clock.advance(hours=2)
     run(e.process_due())
@@ -208,7 +177,8 @@ def test_widget_start_still_queues_notification_on_expiry(data_dir, clock, curl)
 def test_prompt_endpoint(admin, widget):
     a = mk(admin)
     assert widget.get(f"/widget/api/accounts/{a['id']}/prompt").json() == {"prompt": "SECRET-PROMPT-TEXT"}
-    assert TestClient(admin.app).get(f"/widget/api/accounts/{a['id']}/prompt").status_code == 401
+    admin.put("/api/settings", json={"widget": {"enabled": False}})
+    assert widget.get(f"/widget/api/accounts/{a['id']}/prompt").status_code == 404
 
 
 def test_no_cors_headers_granted(widget):
@@ -219,11 +189,16 @@ def test_no_cors_headers_granted(widget):
     ).status_code in (400, 405)
 
 
-def test_widget_assets_and_branding(widget):
+def test_widget_assets_are_credential_free_and_compact(widget):
     html = widget.get("/widget").text
-    assert "Ready Signal" in html and "widget.js" in html and "unpkg" not in html and "cdn" not in html.lower()
+    assert "widget.js" in html and "widget.css" in html and "unpkg" not in html and "cdn" not in html.lower()
+    assert (
+        "Authorization" not in widget.get("/static/widget.js").text
+        and "localStorage" not in widget.get("/static/widget.js").text
+    )
     js = widget.get("/static/widget.js").text
-    assert "ev.origin !== ORIGIN" in js and "Authorization" in js and "localStorage" in js
+    assert "postMessage" not in js and "origin" not in js.lower().replace("origin:", "")
+    assert "320" not in html
 
 
 def test_validation_helper_direct(data_dir, clock):

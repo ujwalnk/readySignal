@@ -4,15 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import copy
-import hashlib
-import hmac
 import logging
-import re
-import secrets as _secrets
-from collections.abc import Callable
-from datetime import datetime, timedelta
+import os
+from collections.abc import Callable, Mapping
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from . import notify
 from .analytics import Analytics
@@ -42,8 +40,8 @@ FILE_NAMES = {
 }
 ANALYTICS_FILE = "analytics.sqlite3"
 ASSETS_SUBDIR = Path("assets") / "icons"
-TOKEN_PREFIX = "rsw_"
-ORIGIN_RE = re.compile(r"https?://[A-Za-z0-9.-]+(:\d{1,5})?")
+ENV_TIMEZONE = "READY_SIGNAL_TIMEZONE"
+ENV_WEBHOOK = "SLACK_WEBHOOK_URL"
 KEEP_FINISHED_JOBS = 100
 
 
@@ -59,15 +57,66 @@ class Conflict(Exception):
     pass
 
 
+class AmbiguousTime(ValidationFailed):
+    """The local wall-clock time occurs twice (DST fall-back); the caller must say which occurrence is meant."""
+
+
+class ConfigError(Exception):
+    """An environment variable holds an unusable value. Messages never contain secret values."""
+
+
 def _bounded_int(value: Any, lo: int, hi: int, label: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or not lo <= value <= hi:
         raise ValidationFailed(f"{label} must be an integer between {lo} and {hi}")
     return value
 
 
+def resolve_local_time(text: str, tz_name: str, occurrence: str | None = None) -> datetime:
+    """Interpret ``text`` (ISO 8601) in ``tz_name`` and return the exact UTC instant.
+
+    * An explicit UTC offset (``...Z``/``+05:30``) is honoured as given and is never ambiguous.
+    * A naive wall-clock time that does not exist (spring-forward gap) is rejected, never shifted.
+    * A naive wall-clock time that occurs twice (fall-back overlap) is rejected with ``AmbiguousTime`` unless
+      ``occurrence`` is ``"earlier"`` or ``"later"``.
+    """
+    if not isinstance(text, str) or not text.strip():
+        raise ValidationFailed("enter the completion date and time")
+    try:
+        dt = datetime.fromisoformat(text.strip().replace("Z", "+00:00"))
+    except ValueError:
+        raise ValidationFailed("completion time must look like 2026-10-16T19:30") from None
+    if dt.tzinfo is not None:
+        return dt.astimezone(timezone.utc)
+    if occurrence not in (None, "earlier", "later"):
+        raise ValidationFailed("occurrence must be 'earlier' or 'later'")
+    tz = ZoneInfo(tz_name)
+    first, second = dt.replace(tzinfo=tz, fold=0), dt.replace(tzinfo=tz, fold=1)
+    utc_first, utc_second = first.astimezone(timezone.utc), second.astimezone(timezone.utc)
+    if utc_first.astimezone(tz).replace(tzinfo=None) != dt:  # round-trip changes the wall time: it falls in a gap
+        raise ValidationFailed(
+            f"{dt:%Y-%m-%d %H:%M} does not exist in {tz_name} (daylight-saving gap); pick another time"
+        )
+    if utc_first == utc_second:
+        return utc_first
+    if occurrence is None:
+        raise AmbiguousTime(
+            f"{dt:%Y-%m-%d %H:%M} happens twice in {tz_name} (daylight-saving change); choose the earlier or later one"
+        )
+    return utc_first if occurrence == "earlier" else utc_second
+
+
 class Engine:
-    def __init__(self, data_dir: str | Path, secret: str | None, clock: Callable[[], datetime] = utcnow) -> None:
+    def __init__(
+        self,
+        data_dir: str | Path,
+        secret: str | None,
+        clock: Callable[[], datetime] = utcnow,
+        env: Mapping[str, str] | None = None,
+    ) -> None:
         self.data_dir = Path(data_dir)
+        self._env = env  # None == the process environment, read at load()
+        self.env_timezone = ""  # effective values from READY_SIGNAL_TIMEZONE / SLACK_WEBHOOK_URL ("" == not managed)
+        self.env_webhook = ""
         self.clock = clock
         self.keyring = Keyring(secret)  # raises SecretError when invalid
         self.lock = asyncio.Lock()  # config / accounts / state
@@ -106,6 +155,7 @@ class Engine:
                 VALIDATORS[name],
                 MIGRATIONS[name],
             )
+        self._load_env()  # invalid values stop the start-up before anything is written
         self.config = self.files["config"].load()
         self.accounts = self.files["accounts"].load()
         self.state = self.files["state"].load()
@@ -123,6 +173,38 @@ class Engine:
             self._open_analytics()
         elif self.config.get("analytics_purge_pending"):
             self._finish_purge()
+
+    def _load_env(self) -> None:
+        """Validate the environment-managed settings. Empty/absent == GUI-managed; invalid == refuse to start."""
+        env = os.environ if self._env is None else self._env
+        tz = (env.get(ENV_TIMEZONE) or "").strip()
+        hook = (env.get(ENV_WEBHOOK) or "").strip()
+        if tz:
+            try:
+                notify.validate_timezone(tz)
+            except ValueError:
+                raise ConfigError(
+                    f"{ENV_TIMEZONE} is not a valid IANA time zone name (e.g. Asia/Kolkata or UTC)"
+                ) from None
+        if hook:
+            try:
+                notify.validate_webhook_url(hook)
+            except ValueError:
+                raise ConfigError(f"{ENV_WEBHOOK} is not a valid https:// Slack incoming-webhook URL") from None
+        self.env_timezone, self.env_webhook = tz, hook
+
+    @property
+    def timezone_name(self) -> str:
+        """Effective application time zone: the environment value wins while it is set."""
+        return self.env_timezone or str(self.config["timezone"])
+
+    def effective_config(self) -> dict[str, Any]:
+        """Deep copy of the stored config with environment-managed values applied (server-side use only)."""
+        c = copy.deepcopy(self.config)
+        c["timezone"] = self.timezone_name
+        if self.env_webhook:
+            c["slack"]["webhook_url"] = self.env_webhook
+        return c
 
     def _open_analytics(self) -> None:
         self.analytics = Analytics(self.data_dir / ANALYTICS_FILE)
@@ -180,12 +262,20 @@ class Engine:
         return [self.view(a, now) for a in self.accounts["accounts"]]
 
     def public_config(self) -> dict[str, Any]:
+        """Config for the browser. The webhook URL (stored or environment) never leaves the server."""
         c = copy.deepcopy(self.config)
-        url = c["slack"].pop("webhook_url")
-        c["slack"]["webhook_configured"] = bool(url)
-        c["slack"]["webhook_masked"] = notify.mask_url(url)  # template stays; URL never leaves the server
-        c["widget"].pop("token_hash")
-        c["widget"]["token_configured"] = bool(self.config["widget"]["token_hash"])
+        c["timezone"] = self.timezone_name
+        stored_url = c["slack"].pop("webhook_url")
+        if self.env_webhook:
+            source, masked = "environment", ""  # not even a suffix of an environment secret is revealed
+        elif stored_url:
+            source, masked = "gui", notify.mask_url(stored_url)
+        else:
+            source, masked = "none", ""
+        c["slack"]["webhook_configured"] = source != "none"
+        c["slack"]["webhook_masked"] = masked
+        c["slack"]["webhook_source"] = source
+        c["env"] = {"timezone": bool(self.env_timezone), "slack_webhook": bool(self.env_webhook)}
         return c
 
     # ------------------------------------------------------------ accounts
@@ -300,31 +390,6 @@ class Engine:
             raise NotFound("image not found") from None
 
     # ------------------------------------------------------------ widget
-    @staticmethod
-    def _token_hash(token: str) -> str:
-        return hashlib.sha256(token.encode("utf-8")).hexdigest()
-
-    async def create_widget_token(self) -> str:
-        """Issue a new widget credential (replacing any previous one). Only its hash is stored; shown once."""
-        async with self.lock:
-            token = TOKEN_PREFIX + _secrets.token_urlsafe(32)
-            new = copy.deepcopy(self.config)
-            new["widget"].update(token_hash=self._token_hash(token), token_created_at=iso(self.clock()))
-            self._commit("config", new)
-            return token
-
-    async def revoke_widget_token(self) -> None:
-        async with self.lock:
-            new = copy.deepcopy(self.config)
-            new["widget"].update(token_hash="", token_created_at=None)
-            self._commit("config", new)
-
-    def widget_authorised(self, token: str | None) -> bool:
-        w = self.config["widget"]
-        if not (w["enabled"] and w["token_hash"] and token):
-            return False
-        return hmac.compare_digest(self._token_hash(token), w["token_hash"])
-
     def _widget_accounts(self) -> list[dict[str, Any]]:
         w = self.config["widget"]
         wanted = set(w["account_ids"])
@@ -380,21 +445,12 @@ class Engine:
                 if not isinstance(patch[key], bool):
                     raise ValidationFailed(f"widget.{key} must be true or false")
                 w[key] = patch[key]
-        if "allowed_origin" in patch:
-            origin = str(patch["allowed_origin"]).strip().rstrip("/")
-            if origin and not ORIGIN_RE.fullmatch(origin):
-                raise ValidationFailed(
-                    "allowed origin must look like https://dashboard.example.com (scheme, host, optional port)"
-                )
-            w["allowed_origin"] = origin
         if "account_ids" in patch:
             ids = patch["account_ids"]
             known = {a["id"] for a in self.accounts["accounts"]}
             if not isinstance(ids, list) or any(not isinstance(i, str) or i not in known for i in ids):
                 raise ValidationFailed("widget.account_ids must list existing account ids")
             w["account_ids"] = list(dict.fromkeys(ids))
-        if w["enabled"] and not w["allowed_origin"]:
-            raise ValidationFailed("set the authorised parent-dashboard origin before enabling the widget")
         return w
 
     # ------------------------------------------------------------ timers
@@ -448,6 +504,53 @@ class Engine:
             )
             self.wake.set()
             return {**self.view(acct, now), "event": etype, "warnings": warnings}
+
+    async def set_expiry(
+        self,
+        account_id: str,
+        completes_at: str | None = None,
+        occurrence: str | None = None,
+        complete_now: bool = False,
+    ) -> dict[str, Any]:
+        """Move the completion time of a *running* cooldown. Metadata and the default duration are untouched.
+
+        ``completes_at`` is a wall-clock time in the effective application time zone (or carries its own UTC offset).
+        It must lie in the future and within MAX_DURATION. ``complete_now=True`` is the explicit way to finish the
+        cooldown immediately: the expiry becomes *now* and goes through the normal completion path (event, Slack job).
+        A new ``expiry_id`` supersedes the old one, so the old deadline can never notify; no reset is counted.
+        """
+        async with self.lock:
+            acct = self._acct(account_id)
+            now = self.clock()
+            async with self.nlock:
+                self._process_expiry_locked(account_id, now)  # settle a lapsed-but-unprocessed expiry first
+            timer = self.state["timers"].get(account_id)
+            if not (timer and timer["status"] == "cooling" and parse_iso(timer["ts_expired"]) > now):
+                raise Conflict("this account has no running cooldown to edit")
+            if acct["archived"]:
+                raise ValidationFailed("archived accounts cannot be edited this way")
+            if complete_now:
+                target = now
+            else:
+                target = resolve_local_time(completes_at or "", self.timezone_name, occurrence)
+                if target <= now:
+                    raise ValidationFailed(
+                        "the completion time must be in the future; to finish the cooldown now use complete_now"
+                    )
+                if target > now + timedelta(seconds=MAX_DURATION):
+                    raise ValidationFailed("the completion time is too far in the future (at most 30 days)")
+            target = target.replace(microsecond=0)
+            if not complete_now and iso(target) == timer["ts_expired"]:
+                return {**self.view(acct, now), "changed": False, "warnings": []}
+            new = copy.deepcopy(self.state)
+            cur = new["timers"][account_id]
+            cur.update(ts_expired=iso(target), expiry_id=new_id(), expiry_processed=False)
+            self._commit("state", new)  # JSON is authoritative; nothing else changes (no reset is counted)
+            if complete_now:
+                async with self.nlock:
+                    self._process_expiry_locked(account_id, now)  # same path as a natural expiry
+            self.wake.set()  # the scheduler recomputes its next deadline
+            return {**self.view(acct, now), "changed": True, "warnings": []}
 
     def _process_expiry_locked(self, account_id: str, now: datetime) -> bool:
         """Caller holds self.lock and self.nlock. Order: job first, then state, so a crash re-runs safely."""
@@ -541,7 +644,7 @@ class Engine:
                 job = next((j for j in self.notifs["jobs"] if j["id"] == job_id), None)
                 if not job or job["status"] != "pending":
                     return
-                cfg = copy.deepcopy(self.config)
+                cfg = self.effective_config()  # environment-managed webhook / time zone applied
                 slack = cfg["slack"]
                 now = self.clock()
                 if not slack["enabled"] or not slack["webhook_url"]:
@@ -621,7 +724,7 @@ class Engine:
 
     async def send_test(self) -> dict[str, Any]:
         """Render with sample data and send. Touches no timers, counters or jobs."""
-        cfg = copy.deepcopy(self.config)
+        cfg = self.effective_config()
         slack = cfg["slack"]
         if not slack["webhook_url"]:
             raise ValidationFailed("no webhook URL configured")
@@ -634,7 +737,7 @@ class Engine:
 
     def preview(self, template: str) -> dict[str, Any]:
         try:
-            return notify.render(template, notify.build_context(notify.SAMPLE_SNAPSHOT, self.config))
+            return notify.render(template, notify.build_context(notify.SAMPLE_SNAPSHOT, self.effective_config()))
         except ValueError as exc:
             raise ValidationFailed(str(exc)) from exc
 
@@ -646,12 +749,16 @@ class Engine:
                 if patch["theme"] not in ("system", "light", "dark"):
                     raise ValidationFailed("theme must be system, light or dark")
                 new["theme"] = patch["theme"]
+            ignored: list[str] = []
             if "timezone" in patch:
-                try:
-                    notify.validate_timezone(str(patch["timezone"]))
-                except ValueError as exc:
-                    raise ValidationFailed(str(exc)) from exc
-                new["timezone"] = str(patch["timezone"])
+                if self.env_timezone:
+                    ignored.append("timezone")  # environment-managed: the stored value is left untouched
+                else:
+                    try:
+                        notify.validate_timezone(str(patch["timezone"]))
+                    except ValueError as exc:
+                        raise ValidationFailed(str(exc)) from exc
+                    new["timezone"] = str(patch["timezone"])
             for key, lo, hi in (
                 ("expiry_check_interval", 5, 3600),
                 ("retry_interval", 1, 86400),
@@ -674,7 +781,10 @@ class Engine:
             if slack is not None:
                 if "enabled" in slack:
                     new["slack"]["enabled"] = bool(slack["enabled"])
-                if slack.get("clear_webhook"):
+                if self.env_webhook:
+                    if slack.get("clear_webhook") or slack.get("webhook_url"):
+                        ignored.append("slack.webhook_url")  # environment-managed: never replaced or cleared
+                elif slack.get("clear_webhook"):
                     new["slack"]["webhook_url"] = ""
                 elif slack.get("webhook_url"):
                     try:
@@ -688,11 +798,14 @@ class Engine:
                     except ValueError as exc:
                         raise ValidationFailed(f"template: {exc}") from exc
                     new["slack"]["template"] = slack["template"]
-                if new["slack"]["enabled"] and not new["slack"]["webhook_url"]:
+                if new["slack"]["enabled"] and not (self.env_webhook or new["slack"]["webhook_url"]):
                     raise ValidationFailed("enter a webhook URL before enabling Slack")
             self._commit("config", new)
         self.wake.set()
-        return self.public_config()
+        out = self.public_config()
+        if ignored:
+            out["ignored"] = ignored  # submitted values for environment-managed settings, not applied
+        return out
 
     # ------------------------------------------------------------ statistics
     async def set_statistics(self, enabled: bool, confirm: bool = False) -> dict[str, Any]:
@@ -752,7 +865,7 @@ class Engine:
         if self.analytics is None:
             raise NotFound("statistics are disabled")
         try:
-            return self.analytics.graphs(tz_name=self.config["timezone"], **filters)
+            return self.analytics.graphs(tz_name=self.timezone_name, **filters)
         except ValueError as exc:
             raise ValidationFailed(str(exc)) from exc
         except Exception as exc:

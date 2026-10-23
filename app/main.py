@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field
 
 from .assets import MAX_UPLOAD_BYTES
 from .crypto import KDF_DEFAULT, SecretError
-from .engine import FILE_NAMES, Conflict, Engine, NotFound, ValidationFailed, backup_blob
+from .engine import FILE_NAMES, AmbiguousTime, ConfigError, Conflict, Engine, NotFound, ValidationFailed, backup_blob
 from .models import iso, utcnow
 from .notify import PLACEHOLDERS
 from .store import StoreError
@@ -29,8 +29,9 @@ COOKIE = "csrf_token"
 APP_NAME = "Ready Signal"
 APP_CSP = (
     "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' blob:; connect-src 'self'; "
-    "base-uri 'none'; form-action 'self'; frame-ancestors {ancestors}"
+    "base-uri 'none'; form-action 'self'"
 )
+APP_FRAMING = "; frame-ancestors 'none'"  # the widget omits the directive: any parent page may embed it
 
 
 class AccountIn(BaseModel):
@@ -39,6 +40,14 @@ class AccountIn(BaseModel):
     duration_seconds: int
     project: str = ""
     prompt: str = ""
+
+
+class ExpiryIn(BaseModel):
+    """Local wall-clock time in the effective time zone (or an ISO string with an explicit offset)."""
+
+    completes_at: str | None = None
+    occurrence: str | None = None  # "earlier"/"later": only needed when a DST change makes the time ambiguous
+    complete_now: bool = False
 
 
 class StatsIn(BaseModel):
@@ -101,15 +110,17 @@ def create_app(
         h.setdefault("X-Content-Type-Options", "nosniff")
         h.setdefault("Referrer-Policy", "no-referrer")
         if request.url.path.startswith("/widget"):
-            # Only the configured parent dashboard may frame the widget; everything else stays unframeable.
-            w = engine.config["widget"]
-            ancestors = w["allowed_origin"] if w["enabled"] and w["allowed_origin"] else "'none'"
-            h.setdefault("Content-Security-Policy", APP_CSP.format(ancestors=ancestors))
+            # The widget is meant to be embedded by a dashboard on the private network: any parent may frame it.
+            h.setdefault("Content-Security-Policy", APP_CSP)  # no frame-ancestors, no X-Frame-Options
             h.setdefault("Cache-Control", "no-store")
         else:
-            h.setdefault("Content-Security-Policy", APP_CSP.format(ancestors="'none'"))
+            h.setdefault("Content-Security-Policy", APP_CSP + APP_FRAMING)
             h.setdefault("X-Frame-Options", "DENY")
         return resp
+
+    @app.exception_handler(AmbiguousTime)
+    async def _a(_: Request, exc: AmbiguousTime) -> JSONResponse:
+        return JSONResponse({"detail": str(exc), "code": "ambiguous_time"}, 422)
 
     @app.exception_handler(ValidationFailed)
     async def _v(_: Request, exc: ValidationFailed) -> JSONResponse:
@@ -173,6 +184,11 @@ def create_app(
     async def start(account_id: str) -> dict[str, Any]:
         return await engine.start(account_id)
 
+    @api.put("/accounts/{account_id}/expiry")
+    async def set_expiry(account_id: str, body: ExpiryIn) -> dict[str, Any]:
+        """Edit when a running cooldown completes (or finish it now). Account metadata is a separate operation."""
+        return await engine.set_expiry(account_id, body.completes_at, body.occurrence, body.complete_now)
+
     @api.put("/accounts/{account_id}/icon")
     async def set_icon(account_id: str, request: Request) -> dict[str, Any]:
         """Raw image bytes as the request body (no multipart dependency); validated and sanitised server-side."""
@@ -229,16 +245,6 @@ def create_app(
     ) -> dict[str, Any]:
         return engine.graphs(date_from=date_from, date_to=date_to, group=group, accounts=account, project=project)
 
-    @api.post("/settings/widget/token")
-    async def widget_token() -> dict[str, Any]:
-        """Issue (or rotate) the widget credential. The plaintext is returned exactly once and never stored."""
-        return {"token": await engine.create_widget_token()}
-
-    @api.delete("/settings/widget/token")
-    async def widget_token_revoke() -> dict[str, str]:
-        await engine.revoke_widget_token()
-        return {"status": "revoked"}
-
     @api.get("/notifications")
     async def notifications() -> dict[str, Any]:
         return {"jobs": engine.list_jobs()}
@@ -281,14 +287,12 @@ def create_app(
         )
 
     # ------------------------------------------------------------ widget (iframe)
-    def widget_auth(request: Request) -> None:
-        scheme, _, token = request.headers.get("authorization", "").partition(" ")
-        if scheme.lower() != "bearer" or not engine.widget_authorised(token.strip()):
-            raise HTTPException(
-                401, "widget credential missing, invalid or revoked", headers={"WWW-Authenticate": "Bearer"}
-            )
+    def widget_enabled() -> None:
+        if not engine.config["widget"]["enabled"]:
+            raise HTTPException(404, "the widget is not enabled")
 
-    wapi = APIRouter(prefix="/widget/api", dependencies=[Depends(widget_auth)])
+    # No credential by design: the widget is an embedded view on a private deployment (docs/widget.md).
+    wapi = APIRouter(prefix="/widget/api", dependencies=[Depends(widget_enabled)])
 
     @wapi.get("/summary")
     async def widget_summary() -> dict[str, Any]:
@@ -302,18 +306,10 @@ def create_app(
     async def widget_prompt(account_id: str) -> dict[str, str]:
         return {"prompt": engine.widget_prompt(account_id)}
 
-    @app.get("/widget", response_class=HTMLResponse)
+    @app.get("/widget", response_class=HTMLResponse, dependencies=[Depends(widget_enabled)])
     async def widget_page() -> HTMLResponse:
-        w = engine.config["widget"]
-        if not (w["enabled"] and w["allowed_origin"]):
-            raise HTTPException(404, "the widget is not enabled")
         html = (STATIC / "widget.html").read_text(encoding="utf-8")
-        html = (
-            html.replace("__THEME__", engine.config["theme"])
-            .replace("__ORIGIN__", w["allowed_origin"])
-            .replace("__APP__", APP_NAME)
-        )
-        return HTMLResponse(html)
+        return HTMLResponse(html.replace("__THEME__", engine.config["theme"]).replace("__APP__", APP_NAME))
 
     app.include_router(wapi)
     app.include_router(api)
@@ -329,7 +325,7 @@ def run() -> None:
     )
     try:
         app = create_app()
-    except (SecretError, StoreError) as exc:
+    except (SecretError, StoreError, ConfigError) as exc:
         logging.getLogger("countdown").critical("refusing to start: %s", exc)
         raise SystemExit(1) from None
     # Single worker is mandatory: the scheduler and queue live in this process.

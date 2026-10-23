@@ -35,5 +35,28 @@
     img.addEventListener("error", () => img.replaceWith(fallback()), { once: true });
     return img;
   }
-  g.RS = Object.assign(g.RS || {}, { h, mount, fmtRemaining, fmtDuration, iconEl });
+  /* Inline SVG icons (stroke geometry adapted from Lucide, ISC licence). Built with createElementNS: no innerHTML. */
+  const NS = "http://www.w3.org/2000/svg";
+  const PATHS = {
+    plus: ["M12 5v14", "M5 12h14"],
+    gear: ["M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z", "M12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6z"],
+    edit: ["M17 3a2.85 2.85 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z", "m15 5 4 4"],
+    copy: ["M9 9h11a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H9a1 1 0 0 1-1-1V10a1 1 0 0 1 1-1z", "M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1"],
+    play: ["M6 4l14 8-14 8z"],
+    extend: ["M12 7v6l3 2", "M12 21a8 8 0 1 0 0-16 8 8 0 0 0 0 16z", "M5 3 2 6", "m22 6-3-3"],
+    download: ["M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4", "m7 10 5 5 5-5", "M12 15V3"],
+    back: ["M19 12H5", "m12 19-7-7 7-7"],
+    archive: ["M21 8v13H3V8", "M1 3h22v5H1z", "M10 12h4"],
+  };
+  function icon(name, cls = "ico") {
+    const svg = document.createElementNS(NS, "svg");
+    svg.setAttribute("viewBox", "0 0 24 24"); svg.setAttribute("class", cls); svg.setAttribute("aria-hidden", "true"); svg.setAttribute("focusable", "false");
+    for (const d of PATHS[name] || []) { const p = document.createElementNS(NS, "path"); p.setAttribute("d", d); svg.append(p); }
+    return svg;
+  }
+  /* Icon-only control with an accessible name and a tooltip. `tag` is "button" or "a". */
+  function ibtn(name, label, attrs = {}, tag = "button") {
+    return h(tag, { class: "ibtn", "aria-label": label, title: label, ...(tag === "button" ? { type: "button" } : {}), ...attrs }, icon(name));
+  }
+  g.RS = Object.assign(g.RS || {}, { h, mount, fmtRemaining, fmtDuration, iconEl, icon, ibtn });
 })(window);

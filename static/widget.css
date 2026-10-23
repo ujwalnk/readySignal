@@ -1,12 +1,33 @@
-body.widget{background:transparent;margin:0}
-body.widget main{padding:8px;max-width:none}
-.wrow{display:flex;align-items:center;gap:12px;background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:10px 12px;margin-bottom:8px}
-.icon.sm{width:40px;height:40px;font-size:1.4rem;border-radius:12px;flex:none}
-.winfo{flex:1;min-width:0}.wname{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.wname strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%}
-.wname .chip{margin-left:0;font-size:.7rem;padding:1px 8px}
-.wtime{font-size:1.5rem;font-weight:700;font-variant-numeric:tabular-nums;line-height:1.15}.wtime.ready{color:var(--ok)}
-.wproj{color:var(--muted);font-size:.82rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.wact{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
-.wact button{min-height:40px;padding:0 14px;font-size:.88rem}
-.connect{padding:12px}
-@media (max-width:420px){.wrow{flex-wrap:wrap}.wact{width:100%;justify-content:stretch}.wact button{flex:1}}
+/* Compact widget (~280x150). One 34px row per account, no cards, no scrolling. Tokens: theme.css. */
+:root{--row:34px;--font:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif}
+*{box-sizing:border-box}
+html,body{margin:0;overflow-x:hidden;background:var(--surface);color:var(--ink);font:12px/1.25 var(--font)}
+main{padding:6px 8px}
+.wrow{display:grid;grid-template-columns:22px minmax(0,1fr) auto auto;align-items:center;gap:8px;height:var(--row);padding:0 2px;border-bottom:1px solid var(--line)}
+.wrow:last-child{border-bottom:0}
+.wrow.cooling{color:var(--cool-ink)}
+.icon{display:grid;place-items:center;width:22px;height:22px;border-radius:6px;background:var(--surface2);font-size:14px;overflow:hidden}
+img.icon{object-fit:contain;padding:1px}
+.wrow.cooling .icon{filter:saturate(.55)}
+.wtext{min-width:0}
+.wname,.wproj{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.wname{font-weight:650;font-size:12px;color:var(--ink)}
+.wproj{font-size:10.5px;color:var(--muted)}
+.wtime{font-variant-numeric:tabular-nums;font-weight:700;font-size:12px;white-space:nowrap;text-align:right}
+.wtime.ready{color:var(--accent)}
+.wact{display:flex;gap:2px;justify-content:flex-end;min-width:50px}
+.wact button{display:grid;place-items:center;width:24px;height:24px;padding:0;border:1px solid transparent;border-radius:6px;background:transparent;color:var(--muted);cursor:pointer}
+.wact button:hover{background:var(--surface2);color:var(--ink)}
+.wact button.go{color:var(--accent)}
+.wact button:disabled{opacity:.45;cursor:progress}
+.wact svg{width:15px;height:15px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.msg{margin:8px 4px;color:var(--muted)}
+/* Transient overlay for errors / clipboard fallback: never changes the row layout. */
+#over{position:fixed;left:4px;right:4px;bottom:4px;z-index:5;padding:6px 8px;border-radius:8px;background:var(--surface2);border:1px solid var(--line-strong);font-size:11px;box-shadow:var(--shadow)}
+#over[hidden]{display:none}
+#over.err{color:var(--err)}
+#over textarea{width:100%;height:46px;margin:4px 0;font:11px/1.3 var(--font);background:var(--sunken);color:var(--ink);border:1px solid var(--line-strong);border-radius:6px}
+#over button{height:22px;padding:0 8px;border:1px solid var(--line-strong);border-radius:6px;background:var(--surface);color:var(--ink);font-size:11px;cursor:pointer}
+@media (max-width:240px){main{padding:4px}.wrow{gap:6px}.wproj{font-size:10px}}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}

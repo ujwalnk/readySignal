@@ -1,9 +1,19 @@
 # Operations
 
 ## Backup / restore
-* UI: Settings → *Download encrypted backup*, or `GET /api/backup` – a tar.gz of the `*.json.enc` files and `assets/icons/*.enc` images (all still encrypted; there is deliberately no plaintext export).
+* UI: Settings → **Data management → Encryption and recovery → Download encrypted backup** (file `ready-signal-backup-encrypted.tar.gz`), or `GET /api/backup` – a tar.gz of the `*.json.enc` files and `assets/icons/*.enc` images (all still encrypted; there is deliberately no plaintext export).
 * Bind-mount copy (stop the container first): `sudo tar czf ready-signal-data.tgz -C ./data .` (includes the optional SQLite file, which is *not* encrypted).
 * Restore: `docker compose down`, extract into the data directory (owner uid/gid 10001, files 600, dirs 700), `docker compose up -d` with the **same SECRET** the backup was made with.
+
+## Environment-managed settings
+Two optional variables (see `.env.example`; both are passed through by `docker-compose.yml` and are **empty by default**):
+
+| Variable | Effect while non-empty |
+|---|---|
+| `READY_SIGNAL_TIMEZONE` | IANA name (e.g. `Asia/Kolkata`). Authoritative time zone for dashboard times, the expiry editor, notification timestamps and statistics. Settings shows the field disabled with "Already set in environment variable". |
+| `SLACK_WEBHOOK_URL` | `https://` Slack incoming-webhook URL, used for notifications and test messages. Settings shows the field disabled with the same note, never the URL, and hides *Remove webhook*. The Slack enable switch, template, preview, test and retry settings stay editable. |
+
+Unset or empty means the GUI-managed value (stored encrypted) is used. Environment values are read **at start-up**: edit `.env` and run `docker compose up -d` (recreates the container; `restart` alone does not reload it). An invalid value stops the start-up with a clear message (`READY_SIGNAL_TIMEZONE is not a valid IANA time zone name…` / `SLACK_WEBHOOK_URL is not a valid https:// Slack incoming-webhook URL`; the webhook value is never printed). The backend ignores GUI attempts to change an environment-managed setting (the response lists it under `ignored`); the stored value is left untouched and becomes effective again if the variable is removed.
 
 ## Recovery
 | Symptom | Action |
@@ -56,6 +66,9 @@ sudo chown -R 10001:10001 ./data
 docker compose up -d --build        # same SECRET; the old volume is left untouched
 ```
 If your live deployment already bind-mounts a directory, keep your existing mapping: only the image tag, environment variables and optional `PUBLIC_BASE_URL`/`FORWARDED_ALLOW_IPS` matter.
+
+## Migrations (2.1.0)
+`config` moves to schema v3: the widget's `allowed_origin`, `token_hash` and `token_created_at` are removed; accounts, timers, analytics and notification jobs are untouched (an encrypted `*.premigrate-v2` copy of `config` is written first). Rolling back to 2.0 is not supported; restore a pre-upgrade backup instead.
 
 ## Migrations (2.0.0)
 `config` and `accounts` move to schema v2 on first start (adds `widget` settings and `icon_asset`); `state` and `notifications` are unchanged. Account IDs, expiry timestamps, durations, reset counts and pending jobs are preserved; encrypted `*.premigrate-v1` copies of the changed files are written first. The SQLite file (if present) gains a `prompt` column. Rolling back to 1.x is not supported — restore the pre-upgrade backup instead. If decryption or migration fails nothing is overwritten.

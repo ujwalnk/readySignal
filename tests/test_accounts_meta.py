@@ -158,7 +158,10 @@ def test_v1_to_v2_migration_preserves_timers_ids_and_jobs(data_dir, clock):
         and e.state["timers"]["acc1"]["ts_expired"] == "2026-10-15T12:00:00Z"
     )
     assert e.notifs["jobs"][0]["attempts"] == 2
-    assert e.accounts["schema_version"] == SCHEMA_VERSIONS["accounts"] == 2 and e.config["schema_version"] == 2
+    assert (
+        e.accounts["schema_version"] == SCHEMA_VERSIONS["accounts"] == 2
+        and e.config["schema_version"] == SCHEMA_VERSIONS["config"] == 3
+    )
     validate_accounts(e.accounts), validate_config(e.config)
     assert (data_dir / (FILE_NAMES["accounts"] + ".premigrate-v1")).read_bytes() == before["accounts"]
     assert (data_dir / (FILE_NAMES["config"] + ".premigrate-v1")).read_bytes() == before["config"]

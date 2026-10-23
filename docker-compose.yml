@@ -1,17 +1,22 @@
 services:
   countdown:
     build: .
-    image: ready-signal:2.0.0
+    image: ready-signal:2.1.0
     restart: unless-stopped
     # Bound to localhost by default. Reach it over Tailscale/SSH tunnel/reverse proxy (see docs/security.md).
     ports:
-      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:8082:8080"
     environment:
       # Fails fast if unset. Put it in an untracked .env file (chmod 600) or use the SECRET_FILE variant below.
-      SECRET: ${SECRET:?set SECRET in .env or the environment}
+      # SECRET: ${SECRET:?set SECRET in .env or the environment}
+      SECRET: 4LHJMJpdrN5i5jcv2O7qnkpfPCoA6rfnIWCjSAZ+AJKQmmhu
       # COOKIE_SECURE: "1"   # enable when served over HTTPS
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}            # shown in the widget embed snippet, e.g. https://signal.example.ts.net
       FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:-127.0.0.1}  # trust X-Forwarded-* only from your reverse proxy
+      # Optional, EMPTY by default so the GUI stays in charge. When non-empty they win over the stored settings and the
+      # matching Settings fields become read-only. Changing them needs `docker compose up -d` (recreates the container).
+      READY_SIGNAL_TIMEZONE: ${READY_SIGNAL_TIMEZONE:-}   # IANA name, e.g. Asia/Kolkata
+      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}           # Slack incoming-webhook URL (a secret: keep it in the untracked .env)
     # Alternative: Compose file-based secret (not an env var, so not visible in `docker inspect`)
     #   environment: { SECRET_FILE: /run/secrets/countdown_secret }
     #   secrets: [countdown_secret]

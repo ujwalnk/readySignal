@@ -185,7 +185,7 @@ def test_template_preview_endpoint_and_static_and_health(client):
     assert client.post("/api/settings/template/preview", json={"template": "{"}).status_code == 422
     assert client.get("/healthz").json()["status"] == "ok"
     css = client.get("/static/app.css").text
-    assert "prefers-color-scheme" in css and "max-width:560px" in css
+    assert "max-width:560px" in css and "prefers-color-scheme" in client.get("/static/theme.css").text
     assert client.get("/api/backup").headers["content-type"] == "application/gzip"
 
 

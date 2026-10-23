@@ -633,3 +633,10 @@ def test_favicon_and_group_sections_wired():
     assert (root / "favicon.svg").read_text().startswith("<svg")
     assert 'rel="icon"' in (root / "index.html").read_text() and 'rel="icon"' in (root / "widget.html").read_text()
     assert "groupSections" in (root / "app.js").read_text() and "groupSections" not in (root / "widget.js").read_text()
+
+
+def test_favicon_routes_serve_the_same_svg(app):
+    svg = (Path(__file__).parent.parent / "static" / "favicon.svg").read_bytes()
+    for path in ("/favicon", "/favicon.ico"):
+        r = app.get(path)
+        assert r.status_code == 200 and r.headers["content-type"].startswith("image/svg+xml") and r.content == svg

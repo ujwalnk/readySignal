@@ -343,9 +343,17 @@ def create_app(
 
     app.include_router(wapi)
     app.include_router(api)
+    def _favicon() -> Response:
+        return Response(
+            (STATIC / "favicon.svg").read_bytes(),
+            media_type="image/svg+xml",
+            headers={"Cache-Control": "public, max-age=86400"},
+        )
+
+    @app.get("/favicon", include_in_schema=False)
     @app.get("/favicon.ico", include_in_schema=False)
     async def favicon() -> Response:
-        return Response((STATIC / "favicon.svg").read_bytes(), media_type="image/svg+xml", headers={"Cache-Control": "public, max-age=86400"})
+        return _favicon()
 
     app.mount("/static", StaticFiles(directory=STATIC), name="static")
     return app

@@ -1,4 +1,6 @@
 # syntax=docker/dockerfile:1
+# Multi-arch: python:3.12-alpine publishes linux/amd64 and linux/arm64 (Raspberry Pi 5 with a 64-bit OS), and every
+# dependency has a musllinux wheel for both, so no architecture-specific changes are needed.
 
 # ---- build stage: install dependencies into a venv that has no pip of its own.
 # Uses prebuilt musllinux wheels only (no compiler in this stage); the build fails loudly if one is missing. ----

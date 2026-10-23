@@ -104,9 +104,30 @@ def test_reminder_today_or_next_day_and_touches_nothing_else(engine, clock, curl
     assert r["remind_at"] == "2026-10-15T18:30:00Z"
     r2 = run(engine.schedule_reminder(a["id"], "07:00"))  # already passed -> tomorrow
     assert r2["remind_at"] == "2026-10-16T07:00:00Z"
-    assert engine.accounts is before[0] and engine.state is before[1]
+    assert engine.accounts is before[0] and engine.state is before[1]  # no metadata given: nothing else changes
     assert a["id"] not in engine.state["timers"]
     assert engine._acct(a["id"])["project"] == "Old" and engine._acct(a["id"])["prompt"] == "old prompt"
+
+
+def test_reminder_project_prompt_nonempty_saved_empty_kept(engine, clock, curl):
+    run(setup_slack(engine))
+    a = acct(engine)
+    run(engine.schedule_reminder(a["id"], "18:30", project="New", prompt=" "))
+    assert engine._acct(a["id"])["project"] == "New" and engine._acct(a["id"])["prompt"] == "old prompt"
+    run(engine.schedule_reminder(a["id"], "19:30", project="", prompt="fresh"))
+    assert engine._acct(a["id"])["project"] == "New" and engine._acct(a["id"])["prompt"] == "fresh"
+    assert a["id"] not in engine.state["timers"] and len(engine.accounts["accounts"]) == 1
+
+
+def test_groups_are_stored_trimmed_and_optional(engine):
+    a = run(engine.create_account({"name": "G", "duration_seconds": 3600, "group": "  Work   Stuff "}))
+    assert a["group"] == "Work Stuff"
+    b = run(engine.create_account({"name": "H", "duration_seconds": 3600}))
+    assert b["group"] == ""
+    c = run(engine.update_account(a["id"], {"name": "G", "duration_seconds": 3600, "group": ""}))
+    assert c["group"] == ""
+    with pytest.raises(ValidationFailed):
+        run(engine.update_account(a["id"], {"name": "G", "duration_seconds": 3600, "group": "x" * 41}))
 
 
 def test_reminder_survives_restart_and_is_delivered_once(engine, data_dir, clock, curl):

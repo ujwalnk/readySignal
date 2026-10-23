@@ -146,6 +146,7 @@ def validate_accounts(d: Any) -> None:
             ("archived", bool),
         ):
             _typed(a, k, t)
+        _check(isinstance(a.get("group", ""), str), "invalid group")
         ic = a.get("icon_asset")
         _check(
             ic is None

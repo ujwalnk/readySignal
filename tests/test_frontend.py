@@ -333,6 +333,8 @@ def test_start_cooldown_opens_three_option_dialog_without_request(app):
     assert "daylight" not in d["text"].lower() and "DST" not in d["text"]
     js = (Path(__file__).parent.parent / "static" / "app.js").read_text()
     assert "/cooldown" in js and "/reminder" in js
+    assert "project: project.value, prompt: prompt.value });" in js  # reminder option also sends project/prompt
+    assert "metaBox.hidden" not in js  # project/prompt fields stay visible for every option
 
 
 @needs_node
@@ -624,3 +626,10 @@ def test_widget_script_has_no_credential_machinery():
     for gone in ("Authorization", "localStorage", "postMessage", "Bearer", "token", "ORIGIN", "ready-signal:"):
         assert gone not in js, gone
     assert "setInterval(tick, 1000)" in js and "60000" in js  # local 1 s countdown; backend polled once a minute
+
+
+def test_favicon_and_group_sections_wired():
+    root = Path(__file__).parent.parent / "static"
+    assert (root / "favicon.svg").read_text().startswith("<svg")
+    assert 'rel="icon"' in (root / "index.html").read_text() and 'rel="icon"' in (root / "widget.html").read_text()
+    assert "groupSections" in (root / "app.js").read_text() and "groupSections" not in (root / "widget.js").read_text()

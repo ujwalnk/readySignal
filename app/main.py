@@ -40,6 +40,7 @@ class AccountIn(BaseModel):
     duration_seconds: int
     project: str = ""
     prompt: str = ""
+    group: str = ""
 
 
 class ExpiryIn(BaseModel):
@@ -60,6 +61,8 @@ class StartIn(BaseModel):
 
 class ReminderIn(BaseModel):
     time: str
+    project: str = ""  # empty == keep the saved value
+    prompt: str = ""
 
 
 class StatsIn(BaseModel):
@@ -209,7 +212,7 @@ def create_app(
 
     @api.post("/accounts/{account_id}/reminder", status_code=201)
     async def reminder(account_id: str, body: ReminderIn) -> dict[str, Any]:
-        return await engine.schedule_reminder(account_id, body.time)
+        return await engine.schedule_reminder(account_id, body.time, body.project, body.prompt)
 
     @api.put("/accounts/{account_id}/expiry")
     async def set_expiry(account_id: str, body: ExpiryIn) -> dict[str, Any]:
@@ -340,6 +343,10 @@ def create_app(
 
     app.include_router(wapi)
     app.include_router(api)
+    @app.get("/favicon.ico", include_in_schema=False)
+    async def favicon() -> Response:
+        return Response((STATIC / "favicon.svg").read_bytes(), media_type="image/svg+xml", headers={"Cache-Control": "public, max-age=86400"})
+
     app.mount("/static", StaticFiles(directory=STATIC), name="static")
     return app
 

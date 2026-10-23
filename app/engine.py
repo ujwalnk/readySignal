@@ -258,6 +258,7 @@ class Engine:
         asset = a.get("icon_asset")
         return {
             **a,
+            "group": a.get("group", ""),
             "icon_url": f"/assets/icons/{asset['id']}" if asset else None,
             "status": "cooling" if cooling else "available",
             "ts_start": t["ts_start"] if cooling and t else None,
@@ -301,10 +302,13 @@ class Engine:
             raise ValidationFailed("project must be at most 100 characters")
         if len(prompt) > 4000:
             raise ValidationFailed("prompt must be at most 4000 characters")
+        group = " ".join(str(d.get("group") or "").split())
+        if len(group) > 40:
+            raise ValidationFailed("group must be at most 40 characters")
         for a in self.accounts["accounts"]:
             if a["id"] != current_id and a["name"].casefold() == name.casefold():
                 raise Conflict("an account with this name already exists")
-        return {"name": name, "icon": icon, "duration_seconds": duration, "project": project, "prompt": prompt}
+        return {"name": name, "icon": icon, "duration_seconds": duration, "project": project, "prompt": prompt, "group": group}
 
     async def create_account(self, d: dict[str, Any]) -> dict[str, Any]:
         async with self.lock:
@@ -574,8 +578,11 @@ class Engine:
         self.wake.set()
         return {**self.view(acct, now), "event": etype, "warnings": warnings}
 
-    async def schedule_reminder(self, account_id: str, hhmm: str) -> dict[str, Any]:
-        """One-off Slack reminder at HH:MM in the effective zone (next day if already past). Touches no timer or metadata."""
+    async def schedule_reminder(
+        self, account_id: str, hhmm: str, project: str | None = None, prompt: str | None = None
+    ) -> dict[str, Any]:
+        """One-off Slack reminder at HH:MM in the effective zone (next day if already past). Touches no timer.
+        Non-empty ``project``/``prompt`` replace the saved values (empty keeps them), exactly as in the cooldown dialog."""
         m = HHMM.match((hhmm or "").strip())
         if not m:
             raise ValidationFailed("Enter the reminder time as HH:MM (24-hour), e.g. 18:30.")
@@ -599,6 +606,24 @@ class Engine:
                     if at > now:
                         break
                     day = day + timedelta(days=1)
+                new_project = (project or "").strip()
+                new_prompt = prompt if (prompt or "").strip() else ""
+                if len(new_project) > 100:
+                    raise ValidationFailed("project must be at most 100 characters")
+                if len(new_prompt) > 4000:
+                    raise ValidationFailed("prompt must be at most 4000 characters")
+                meta_changed = bool(new_project or new_prompt)
+                if meta_changed:
+                    accts = copy.deepcopy(self.accounts)
+                    a2 = next(a for a in accts["accounts"] if a["id"] == account_id)
+                    if new_project:
+                        a2["project"] = new_project
+                    if new_prompt:
+                        a2["prompt"] = new_prompt
+                    a2["modified_at"] = iso(now)
+                    self._commit("accounts", accts)
+                    acct = a2
+                    self._sync_account(acct)
                 rid = new_id()
                 new = copy.deepcopy(self.notifs)
                 new["jobs"].append(
@@ -625,7 +650,12 @@ class Engine:
                         },
                     }
                 )
-                self._commit("notifications", new)
+                try:
+                    self._commit("notifications", new)
+                except StoreError as exc:
+                    if meta_changed:
+                        raise PartialFailure(f"The project/prompt were saved, but the reminder was not scheduled: {exc}") from exc
+                    raise
         self.wake.set()
         return {"id": rid, "remind_at": iso(at), "account_id": account_id}
 

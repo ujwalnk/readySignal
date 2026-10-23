@@ -79,7 +79,7 @@ function cooldownDialog(a) {
   const choices = [
     ["default", cooling ? "Extend by default" : "Use default duration", cooling ? `Adds ${dur} to the current end time` : `${dur} from now`],
     ["at", "Set completion time", "Pick the exact end date and time"],
-    ["remind", "Remind me at", "One-off Slack reminder; no cooldown change"],
+    ["remind", "Remind me at", "One-off Slack reminder; the cooldown is not changed"],
   ];
   const atInput = h("input", { type: "datetime-local", name: "completes_at", step: 60, "aria-label": "Cooldown completes at" });
   const occ = h("select", { name: "occurrence", "aria-label": "Which occurrence" }, h("option", { value: "earlier" }, "Earlier occurrence"), h("option", { value: "later" }, "Later occurrence"));
@@ -101,7 +101,7 @@ function cooldownDialog(a) {
   });
   function setMode(m) {
     mode = m; err.textContent = "";
-    atBox.hidden = m !== "at"; remBox.hidden = m !== "remind"; metaBox.hidden = m === "remind";
+    atBox.hidden = m !== "at"; remBox.hidden = m !== "remind";
     submit.textContent = m === "remind" ? "Set reminder" : cooling && m === "default" ? "Extend cooldown" : "Start cooldown";
   }
   setMode("default");
@@ -114,7 +114,7 @@ function cooldownDialog(a) {
     try {
       let r;
       if (mode === "remind") {
-        r = await api("POST", `/accounts/${a.id}/reminder`, { time: hhmm.value.trim() });
+        r = await api("POST", `/accounts/${a.id}/reminder`, { time: hhmm.value.trim(), project: project.value, prompt: prompt.value });
         dlg.close(); toast("Reminder set for " + fmtLocal(r.remind_at));
       } else {
         r = await api("POST", `/accounts/${a.id}/cooldown`, { mode, project: project.value, prompt: prompt.value,
@@ -150,11 +150,20 @@ function card(a) {
           h("button", { class: "primary", onclick: () => cooldownDialog(a) }, RS.icon("play"), "Start cooldown")),
     cooling ? h("div", { class: "bar2", "aria-hidden": "true" }, h("i")) : null);
 }
+function groupSections(list) {
+  if (!list.some(a => a.group)) return h("div", { class: "grid" }, list.map(card));  // no groups: unchanged layout
+  const order = [], by = new Map();
+  for (const a of list) { const g = a.group || ""; if (!by.has(g)) { by.set(g, []); if (g) order.push(g); } by.get(g).push(a); }
+  if (by.has("")) order.push("");
+  return order.map(g => h("section", { class: "group", "aria-label": g || "Ungrouped" },
+    h("h2", { class: "grouptitle" }, g || "Ungrouped", h("span", { class: "count" }, String(by.get(g).length))),
+    h("div", { class: "grid" }, by.get(g).map(card))));
+}
 function dashboard() {
   const list = S.accounts.filter(a => !a.archived);
   mount($("#main"), h("h2", { class: "sr" }, "Accounts"),
     S.analyticsError ? h("div", { class: "banner" }, S.analyticsError + ". Timers are unaffected; history may be incomplete.") : null,
-    list.length ? h("div", { class: "grid" }, list.map(card)) : h("div", { class: "emptycard" }, h("strong", {}, "No accounts yet"), "Use the + in the header to add your first account."));
+    list.length ? groupSections(list) : h("div", { class: "emptycard" }, h("strong", {}, "No accounts yet"), "Use the + in the header to add your first account."));
   startTicker();
 }
 function archived() {
@@ -193,7 +202,7 @@ function accountDialog(a) {
   const f = h("form", { novalidate: true, onsubmit: async ev => {
     ev.preventDefault(); err.textContent = "";
     const v = Object.fromEntries(new FormData(f));
-    const body = { name: v.name, icon: v.icon || "⏳", duration_seconds: (+v.hours || 0) * 3600 + (+v.minutes || 0) * 60, project: v.project, prompt: v.prompt };
+    const body = { name: v.name, icon: v.icon || "⏳", duration_seconds: (+v.hours || 0) * 3600 + (+v.minutes || 0) * 60, project: v.project, prompt: v.prompt, group: v.group || "" };
     const moveExpiry = cooling && expiry.value !== expiryInit;  // untouched field => the running timer is never rewritten
     if (moveExpiry && !expiry.value) { err.textContent = "Enter the cooldown completion date and time."; return; }
     let saved;
@@ -226,6 +235,9 @@ function accountDialog(a) {
     h("div", { class: "two" }, h("label", {}, "Cooldown hours", h("input", { name: "hours", type: "number", min: 0, max: 720, value: hrs, inputmode: "numeric" })),
       h("label", {}, "Minutes", h("input", { name: "minutes", type: "number", min: 0, max: 59, value: mins, inputmode: "numeric" }))),
     h("p", { class: "hint" }, "The default duration is what Start cooldown uses. Changing it never moves a running cooldown."),
+    h("label", {}, "Group", h("input", { name: "group", maxlength: 40, value: a?.group || "", list: "grouplist", autocomplete: "off", placeholder: "Optional, e.g. Work" }),
+      h("datalist", { id: "grouplist" }, [...new Set(S.accounts.map(x => x.group).filter(Boolean))].sort().map(g => h("option", { value: g }))),
+      h("span", { class: "hint" }, "Accounts with the same group appear together in their own section on the dashboard. Leave empty for none.")),
     h("label", {}, "Current project", h("input", { name: "project", maxlength: 100, value: a?.project || "" }),
       h("span", { class: "hint" }, "Changing the project or prompt never touches the running cooldown.")),
     h("label", {}, "Current continuation prompt", h("textarea", { name: "prompt", maxlength: 4000 }, a?.prompt || ""),
